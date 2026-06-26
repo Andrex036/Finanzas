@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Finanzas Familiares</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2306111f'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-size='34' font-family='Arial' font-weight='700' fill='%2338bdf8'%3E$%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">$</span>
+          <div>
+            <strong>Finanzas</strong>
+            <small>Control familiar</small>
+          </div>
+        </div>
+        <nav id="desktopNav" class="nav"></nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Panel offline</p>
+            <h1 id="viewTitle">Dashboard</h1>
+          </div>
+          <div class="period-controls">
+            <select id="yearSelect" aria-label="Ano"></select>
+            <select id="monthSelect" aria-label="Mes"></select>
+          </div>
+        </header>
+        <section id="view" class="view" aria-live="polite"></section>
+      </main>
+
+      <nav id="mobileNav" class="mobile-nav"></nav>
+    </div>
+
+    <template id="emptyState">
+      <div class="empty">
+        <strong>No hay datos para mostrar.</strong>
+        <span>Registra informacion o carga un respaldo.</span>
+      </div>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
