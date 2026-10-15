@@ -20,15 +20,29 @@ La app no necesita backend ni base de datos. El servidor local solo entrega los 
 
 ## Funciones incluidas
 
-- Inicio: resumen mensual de recursos, gastos, disponible y porcentaje usado.
-- Presupuesto: ingreso de recursos del mes como nomina, arriendos, trabajos profesionales, proyectos y otros ingresos.
-- Movimientos: registro, edicion y eliminacion de gastos por categoria.
+- Inicio: resumen mensual del saldo disponible actual y el saldo proyectado despues de las obligaciones.
+- Inicio incluye indicadores de ingresos, pagos, obligaciones pendientes y vencidas, compromiso de recursos, distribucion por categoria, estado de obligaciones y evolucion de seis meses. Las barras incluyen sus importes textuales y el diseño se adapta a pantallas moviles.
+- Presupuesto: registro separado del ingreso esperado y del importe efectivamente recibido.
+- Movimientos: registro del valor total de cada obligacion, el importe pagado y el saldo pendiente.
 - Categorias personalizadas desde la opcion `Otro` en Movimientos.
-- Fecha de registro, fecha final de pago, estado Pendiente/Pagado y alertas de vencimiento.
+- Fecha de registro, fecha limite y estados calculados Pendiente/Parcial/Pagado/Vencido, con alertas de vencimiento.
 - Boton `Pagado` para marcar un movimiento pendiente como pagado.
 - Opcion para copiar los movimientos del mes anterior al mes actual.
 - Guardado automatico en LocalStorage.
+- Respaldo JSON descargable y recuperacion por restauracion o combinacion.
 - Diseno responsive para escritorio, tablet y movil.
+
+## Respaldo y recuperación
+
+En Inicio, abre **Respaldo y recuperación** para descargar o importar un archivo JSON. Antes de recuperar, la aplicación valida la estructura, los importes y la versión y muestra el contenido detectado.
+
+- **Restaurar** sustituye los datos actuales solo tras confirmación y luego de iniciar la descarga y el archivo local de una copia previa.
+- **Combinar** conserva los datos y configuración actuales, agrega registros nuevos y deja intacto cualquier registro con el mismo identificador pero contenido distinto; esos conflictos se muestran antes de confirmar.
+- Las migraciones crean un archivo local con el contenido original antes de actualizar el esquema. Nunca se utiliza `eval()` ni se envían datos financieros a servicios externos.
+- Los datos permanecen en `localStorage` de este navegador y pueden perderse al borrar sus datos o cambiar de dispositivo. Conserva el archivo descargado en otro lugar seguro.
+- Si el navegador no puede escribir por falta de espacio u otro error, la aplicación informa que los cambios no se guardaron. Los datos dañados o inválidos no se reemplazan automáticamente.
+
+El respaldo exportado contiene configuración, ingresos, gastos, presupuestos, categorías, deudas, metas de ahorro, versión de esquema y fecha de generación. Las versiones anteriores admitidas se migran progresivamente y conservan un historial de migración.
 
 ## Publicar en GitHub Pages
 
@@ -52,6 +66,18 @@ La app no necesita backend ni base de datos. El servidor local solo entrega los 
 
 ## Uso basico
 
-1. Entra a Presupuesto y registra los recursos esperados del mes.
-2. Entra a Movimientos y registra cada gasto.
-3. Revisa Inicio para ver cuanto entro, cuanto se gasto y cuanto queda disponible.
+1. Entra a Presupuesto y registra por separado el ingreso esperado y lo que ya recibiste.
+2. Entra a Movimientos y registra el total de cada gasto y cuanto has pagado hasta ahora.
+3. Revisa Inicio: el saldo disponible descuenta solo ingresos recibidos y pagos realizados; el saldo proyectado tambien descuenta los saldos pendientes, incluidos los vencidos.
+
+## Criterio contable
+
+Los movimientos conservan `valorPresupuestado` como importe total, `valorPagado` como importe efectivamente abonado y `valorFaltante` como el saldo pendiente (nunca negativo). El modelo guarda `versionModeloFinanciero` y, para registros historicos ambiguos, `migracionFinanciera.original` conserva los valores anteriores y la regla aplicada. Un registro historico con estado `Pendiente` no se considera pagado durante la migracion.
+
+El saldo disponible actual es ingresos recibidos menos gastos pagados. El saldo proyectado es el saldo actual menos las obligaciones pendientes. Ambos se calculan desde los registros del periodo y usan valores enteros en COP.
+
+La suite automatizada (cálculos, persistencia, periodos y operaciones de formularios) se ejecuta con:
+
+```bash
+node --test
+```

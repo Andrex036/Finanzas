@@ -1,4 +1,6 @@
 export const STORAGE_KEY = "finanzas_personales_v1";
+export const DATA_SCHEMA_VERSION = 2;
+export const MIGRATION_ARCHIVE_PREFIX = `${STORAGE_KEY}_migration_backup_`;
 
 export const MONTHS = [
   "enero",
@@ -26,6 +28,7 @@ export const MOVEMENT_TYPES = [
 ];
 
 export const STATUS_OPTIONS = ["Pendiente", "Pagado", "Parcial", "Vencido"];
+export const FINANCIAL_MODEL_VERSION = 2;
 
 export const PAYMENT_METHODS = [
   "Efectivo",
@@ -75,6 +78,10 @@ function toNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function toMoney(value) {
+  return Math.max(0, Math.round(toNumber(value)));
+}
+
 function round2(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
@@ -96,20 +103,148 @@ function yearFromDate(fecha) {
 
 export function formatCOP(value) {
   const rounded = Math.round(toNumber(value));
-  return `$ ${new Intl.NumberFormat("es-CO", { maximumFractionDigits: 0 }).format(rounded)} COP`;
+  const formatted = new Intl.NumberFormat("es-CO", { maximumFractionDigits: 0 }).format(Math.abs(rounded));
+  return `${rounded < 0 ? "-$" : "$"} ${formatted} COP`;
 }
 
-export function normalizeMovement(input = {}) {
-  const fecha = input.fecha || new Date().toISOString().slice(0, 10);
-  const valorPresupuestado = toNumber(input.valorPresupuestado);
-  const valorPagado = toNumber(input.valorPagado);
-  const valorFaltante = valorPresupuestado - valorPagado;
-  let estado = input.estado || "Pendiente";
+function getStatus(total, paid, dueDate, now = new Date()) {
+  const remaining = Math.max(0, total - paid);
+  if (remaining === 0 && (total > 0 || paid > 0)) return "Pagado";
+  if (remaining > 0 && dueDate && dueDate < now.toISOString().slice(0, 10)) return "Vencido";
+  return paid > 0 ? "Parcial" : "Pendiente";
+}
 
-  if (!input.estado) {
-    if (valorPresupuestado > 0 && valorPagado >= valorPresupuestado) estado = "Pagado";
-    else if (valorPagado > 0) estado = "Parcial";
+function financialAmounts(record = {}) {
+  const total = toMoney(record.valorPresupuestado ?? record.valorPagado);
+  let paid = toMoney(record.valorPagado);
+  if ((Number(record.versionModeloFinanciero) || 0) < FINANCIAL_MODEL_VERSION && record.estado === "Pendiente") paid = 0;
+  return { total, paid, remaining: Math.max(0, total - paid) };
+}
+
+export function getMovementStatus(movement, now = new Date()) {
+  const { total, paid } = financialAmounts(movement);
+  return getStatus(total, paid, movement.fechaLimite, now);
+}
+
+export function periodKey(year, month) {
+  const monthIndex = MONTHS.indexOf(String(month).toLowerCase());
+  if (monthIndex < 0) throw new Error(`Mes invalido: ${month}`);
+  return `${Number(year)}-${String(monthIndex + 1).padStart(2, "0")}`;
+}
+
+export function shiftDateToPeriod(sourceDate, year, month) {
+  const targetPeriod = periodKey(year, month);
+  const [targetYear, targetMonth] = targetPeriod.split("-").map(Number);
+  const parsed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(sourceDate || ""));
+  const sourceDay = parsed ? Number(parsed[3]) : 1;
+  const lastDay = new Date(targetYear, targetMonth, 0).getDate();
+  return `${targetPeriod}-${String(Math.min(sourceDay, lastDay)).padStart(2, "0")}`;
+}
+
+function normalizeDuplicateText(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("es-CO");
+}
+
+export function buildMovementCopyPlan(sourceRows, targetRows, targetYear, targetMonth, selectedIds = sourceRows.map((row) => row.id), includePossibleIds = []) {
+  const targetKey = periodKey(targetYear, targetMonth);
+  const selected = new Set(selectedIds);
+  const includePossible = new Set(includePossibleIds);
+  const destinationRows = targetRows.filter((row) => Number(row.anio) === Number(targetYear) && String(row.mes).toLowerCase() === String(targetMonth).toLowerCase());
+  const entries = sourceRows.filter((row) => selected.has(row.id)).map((source) => {
+    const existingCopy = destinationRows.find((row) => row.origenCopiaId === source.id && row.periodoCopia === targetKey);
+    if (existingCopy) return { source, type: "duplicate", existing: existingCopy, copy: null };
+
+    const matchingLegacy = destinationRows.filter((row) =>
+      !row.origenCopiaId
+      && normalizeDuplicateText(row.categoria) === normalizeDuplicateText(source.categoria)
+      && normalizeDuplicateText(row.descripcion) === normalizeDuplicateText(source.descripcion)
+      && toMoney(row.valorPresupuestado) === toMoney(source.valorPresupuestado)
+      && String(row.fecha) === shiftDateToPeriod(source.fecha, targetYear, targetMonth)
+      && String(row.fechaLimite || "") === (source.fechaLimite ? shiftDateToPeriod(source.fechaLimite, targetYear, targetMonth) : ""),
+    );
+    const copy = createCopiedMovement(source, targetYear, targetMonth);
+    if (matchingLegacy.length) {
+      return {
+        source,
+        type: "possible",
+        matches: matchingLegacy,
+        included: includePossible.has(source.id),
+        copy: includePossible.has(source.id) ? copy : null,
+      };
+    }
+    return { source, type: "new", copy };
+  });
+  const newEntries = entries.filter((entry) => entry.copy);
+  return {
+    targetPeriod: targetKey,
+    entries,
+    selectedCount: entries.length,
+    newCount: newEntries.length,
+    duplicateCount: entries.filter((entry) => entry.type === "duplicate").length,
+    possibleCount: entries.filter((entry) => entry.type === "possible").length,
+    totalNewValue: newEntries.reduce((sum, entry) => sum + toMoney(entry.copy.valorPresupuestado), 0),
+    copies: newEntries.map((entry) => entry.copy),
+  };
+}
+
+export function createCopiedMovement(source, targetYear, targetMonth, makeId = () => id("mov")) {
+  const fecha = shiftDateToPeriod(source.fecha, targetYear, targetMonth);
+  const fechaLimite = source.fechaLimite ? shiftDateToPeriod(source.fechaLimite, targetYear, targetMonth) : "";
+  const copied = normalizeMovement({
+    ...source,
+    id: makeId(),
+    fecha,
+    fechaLimite,
+    anio: Number(targetYear),
+    mes: String(targetMonth).toLowerCase(),
+    valorPagado: 0,
+    valorFaltante: toMoney(source.valorPresupuestado),
+    estado: "Pendiente",
+    versionModeloFinanciero: FINANCIAL_MODEL_VERSION,
+    origenCopiaId: source.id,
+    periodoCopia: periodKey(targetYear, targetMonth),
+    migracionFinanciera: undefined,
+  });
+  return {
+    ...copied,
+    estado: "Pendiente",
+    valorPagado: 0,
+    valorFaltante: toMoney(source.valorPresupuestado),
+  };
+}
+
+export function normalizeMovement(input = {}, now = new Date()) {
+  const fecha = input.fecha || new Date().toISOString().slice(0, 10);
+  const version = Number(input.versionModeloFinanciero) || 0;
+  const estadoOriginal = input.estado || "";
+  const valorPresupuestadoOriginal = input.valorPresupuestado;
+  const valorPagadoOriginal = input.valorPagado;
+  const valorFaltanteOriginal = input.valorFaltante ?? input.faltante;
+  let valorPresupuestado = toMoney(input.valorPresupuestado ?? input.valorPagado);
+  let valorPagado = toMoney(input.valorPagado);
+  let migracionFinanciera = input.migracionFinanciera;
+
+  if (version < FINANCIAL_MODEL_VERSION) {
+    if (estadoOriginal === "Pendiente" && valorPagado > 0) {
+      migracionFinanciera ||= {
+        version: FINANCIAL_MODEL_VERSION,
+        fecha: now.toISOString(),
+        regla: "El importe de un registro historico Pendiente no se considera pagado.",
+        original: {
+          valorPresupuestado: valorPresupuestadoOriginal ?? null,
+          valorPagado: valorPagadoOriginal ?? null,
+          valorFaltante: valorFaltanteOriginal ?? null,
+          estado: estadoOriginal,
+        },
+      };
+      valorPagado = 0;
+    } else if (estadoOriginal === "Pagado" && valorPagado === 0 && valorPresupuestado > 0) {
+      valorPagado = valorPresupuestado;
+    }
   }
+
+  const valorFaltante = Math.max(0, valorPresupuestado - valorPagado);
+  const estado = getStatus(valorPresupuestado, valorPagado, input.fechaLimite || "", now);
 
   return {
     id: input.id || id("mov"),
@@ -125,6 +260,10 @@ export function normalizeMovement(input = {}) {
     valorPagado,
     valorFaltante,
     estado,
+    versionModeloFinanciero: FINANCIAL_MODEL_VERSION,
+    ...(input.origenCopiaId ? { origenCopiaId: input.origenCopiaId } : {}),
+    ...(input.periodoCopia ? { periodoCopia: input.periodoCopia } : {}),
+    ...(migracionFinanciera ? { migracionFinanciera } : {}),
     medioPago: input.medioPago || "Cuenta bancaria",
     responsable: input.responsable || "",
     observacion: input.observacion || "",
@@ -132,8 +271,31 @@ export function normalizeMovement(input = {}) {
 }
 
 export function normalizeBudgetItem(input = {}) {
-  const valorPresupuestado = toNumber(input.valorPresupuestado);
-  const valorPagado = toNumber(input.valorPagado);
+  const version = Number(input.versionModeloFinanciero) || 0;
+  const estadoOriginal = input.estado || "";
+  const valorPresupuestadoOriginal = input.valorPresupuestado;
+  const valorPagadoOriginal = input.valorPagado;
+  const valorFaltanteOriginal = input.valorFaltante ?? input.faltante;
+  let valorPresupuestado = toMoney(input.valorPresupuestado ?? input.valorPagado);
+  let valorPagado = toMoney(input.valorPagado);
+  let migracionFinanciera = input.migracionFinanciera;
+  if (version < FINANCIAL_MODEL_VERSION && estadoOriginal === "Pendiente" && valorPagado > 0) {
+    migracionFinanciera ||= {
+      version: FINANCIAL_MODEL_VERSION,
+      fecha: new Date().toISOString(),
+      regla: "El importe de un registro historico Pendiente no se considera recibido.",
+      original: {
+        valorPresupuestado: valorPresupuestadoOriginal ?? null,
+        valorPagado: valorPagadoOriginal ?? null,
+        valorFaltante: valorFaltanteOriginal ?? null,
+        estado: estadoOriginal,
+      },
+    };
+    valorPagado = 0;
+  } else if (version < FINANCIAL_MODEL_VERSION && estadoOriginal === "Pagado" && valorPagado === 0 && valorPresupuestado > 0) {
+    valorPagado = valorPresupuestado;
+  }
+  const estado = getStatus(valorPresupuestado, valorPagado, input.fechaLimite || "");
   return {
     id: input.id || id("pre"),
     anio: Number(input.anio) || new Date().getFullYear(),
@@ -142,9 +304,13 @@ export function normalizeBudgetItem(input = {}) {
     concepto: input.concepto || input.descripcion || "",
     valorPresupuestado,
     valorPagado,
-    faltante: valorPresupuestado - valorPagado,
-    estado: input.estado || (valorPagado >= valorPresupuestado && valorPresupuestado > 0 ? "Pagado" : "Pendiente"),
+    valorFaltante: Math.max(0, valorPresupuestado - valorPagado),
+    faltante: Math.max(0, valorPresupuestado - valorPagado),
+    estado,
     fechaLimite: input.fechaLimite || "",
+    tipo: input.tipo || "Ingreso",
+    versionModeloFinanciero: FINANCIAL_MODEL_VERSION,
+    ...(migracionFinanciera ? { migracionFinanciera } : {}),
   };
 }
 
@@ -182,8 +348,8 @@ export function normalizeGoal(input = {}) {
 }
 
 export function createInitialState() {
-  const currentYear = 2026;
-  const currentMonth = "junio";
+  const currentYear = new Date().getFullYear();
+  const currentMonth = MONTHS[new Date().getMonth()];
   const categorias = DEFAULT_CATEGORY_ROWS.map(([nombre, tipo], index) => ({
     id: `cat_${index + 1}`,
     nombre,
@@ -191,42 +357,15 @@ export function createInitialState() {
     activa: true,
   }));
 
-  const movimientos = [
-    { fecha: "2026-06-01", tipo: "Ingreso", categoria: "Salario", descripcion: "Nomina mensual", valorPresupuestado: 3200000, valorPagado: 3200000, estado: "Pagado", responsable: "Felipe" },
-    { fecha: "2026-06-02", tipo: "Gasto variable", categoria: "Comida", descripcion: "Comida del mes", valorPresupuestado: 600000, valorPagado: 600000, estado: "Pagado", responsable: "Familia" },
-    { fecha: "2026-06-03", tipo: "Gasto variable", categoria: "Mercado", descripcion: "Mercado familiar", valorPresupuestado: 400000, valorPagado: 350000, responsable: "Familia" },
-    { fecha: "2026-06-04", tipo: "Gasto fijo", categoria: "Colegio", descripcion: "Colegio", valorPresupuestado: 220000, valorPagado: 220000, estado: "Pagado", responsable: "Felipe" },
-    { fecha: "2026-06-05", tipo: "Gasto variable", categoria: "Gasolina", descripcion: "Gasolina", valorPresupuestado: 100000, valorPagado: 100000, estado: "Pagado", responsable: "Felipe" },
-    { fecha: "2026-06-06", tipo: "Gasto fijo", categoria: "TV - Internet", descripcion: "Internet hogar", valorPresupuestado: 180000, valorPagado: 180000, estado: "Pagado", responsable: "Felipe" },
-    { fecha: "2026-06-07", tipo: "Gasto fijo", categoria: "Datos moviles", descripcion: "Planes celulares", valorPresupuestado: 50000, valorPagado: 0, estado: "Pendiente", responsable: "Felipe" },
-    { fecha: "2026-06-08", tipo: "Gasto fijo", categoria: "Administracion y servicios", descripcion: "Administracion + servicios", valorPresupuestado: 467000, valorPagado: 467000, estado: "Pagado", responsable: "Familia" },
-    { fecha: "2026-06-15", tipo: "Deuda", categoria: "BBVA", descripcion: "Cuota credito", valorPresupuestado: 240000, valorPagado: 240000, estado: "Pagado", responsable: "Felipe" },
-    { fecha: "2026-06-20", tipo: "Ahorro", categoria: "Fondo de emergencia", descripcion: "Aporte ahorro", valorPresupuestado: 300000, valorPagado: 200000, responsable: "Familia" },
-  ].map(normalizeMovement);
-
   return {
-    version: 1,
+    version: DATA_SCHEMA_VERSION,
+    schemaVersion: DATA_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
     settings: { moneda: "COP", anioActivo: currentYear, mesActivo: currentMonth },
-    movimientos,
-    presupuestos: movimientos.filter((item) => item.tipo !== "Ingreso").map((item) => normalizeBudgetItem({
-      anio: item.anio,
-      mes: item.mes,
-      categoria: item.categoria,
-      concepto: item.descripcion,
-      valorPresupuestado: item.valorPresupuestado,
-      valorPagado: item.valorPagado,
-      estado: item.estado,
-      fechaLimite: item.fecha,
-    })),
-    deudas: [
-      normalizeDebt({ id: "deuda_bbva", entidad: "BBVA", tipo: "Credito", saldoInicial: 5000000, saldoActual: 3200000, cuotaMensual: 240000, fechaPago: 25, tasaInteres: 1.4, estado: "Activa", observacion: "Amortizacion de referencia en Excel." }),
-      normalizeDebt({ id: "deuda_nu", entidad: "NU", tipo: "Tarjeta de credito", saldoInicial: 900000, saldoActual: 450000, cuotaMensual: 150000, fechaPago: 10, estado: "Activa", observacion: "" }),
-    ],
-    metasAhorro: [
-      normalizeGoal({ id: "meta_emergencia", nombre: "Fondo de emergencia", valorObjetivo: 3000000, valorAhorrado: 1000000, fechaObjetivo: "2026-12-31", observacion: "Meta principal familiar." }),
-      normalizeGoal({ id: "meta_vacaciones", nombre: "Vacaciones", valorObjetivo: 2000000, valorAhorrado: 250000, fechaObjetivo: "2026-11-30", observacion: "" }),
-    ],
+    movimientos: [],
+    presupuestos: [],
+    deudas: [],
+    metasAhorro: [],
     categorias,
   };
 }
@@ -235,21 +374,49 @@ export function getMonthlyMovements(state, year, month) {
   return (state.movimientos || []).filter((item) => Number(item.anio) === Number(year) && item.mes === month);
 }
 
-export function calculateMonthlySummary(state, year, month) {
+export function upsertRecord(rows, record) {
+  const existing = rows.findIndex((item) => item.id === record.id);
+  return existing < 0
+    ? [record, ...rows]
+    : rows.map((item) => item.id === record.id ? record : item);
+}
+
+export function removeRecord(rows, recordId) {
+  return rows.filter((item) => item.id !== recordId);
+}
+
+export function addCategoryIfMissing(categories, category) {
+  const clean = String(category || "").trim();
+  if (!clean || clean === "Otro") return { category: "", categories: [...categories], added: false };
+  const exists = categories.some((item) => item.toLowerCase() === clean.toLowerCase());
+  return {
+    category: clean,
+    categories: exists ? [...categories] : [...categories, clean],
+    added: !exists,
+  };
+}
+
+export function calculateMonthlySummary(state, year, month, now = new Date()) {
   const rows = getMonthlyMovements(state, year, month);
-  const sumPaid = (type) => rows.filter((item) => item.tipo === type).reduce((sum, item) => sum + toNumber(item.valorPagado), 0);
-  const totalIngresos = sumPaid("Ingreso");
+  const recursos = (state.presupuestos || [])
+    .filter((item) => Number(item.anio) === Number(year)
+      && item.mes === month
+      && (item.tipo === "Ingreso" || (!item.tipo && state.settings?.appMode === "simple-v2")));
+  const idsRecurso = new Set(recursos.map((item) => item.id));
+  const ingresos = [...recursos, ...rows.filter((item) => item.tipo === "Ingreso" && !idsRecurso.has(item.id))];
+  const gastos = rows.filter((item) => !["Ingreso", "Transferencia interna"].includes(item.tipo));
+  const financial = calculateFinancialSummary(ingresos, gastos, now);
+  const sumPaid = (type) => gastos.filter((item) => item.tipo === type).reduce((sum, item) => sum + financialAmounts(item).paid, 0);
   const totalGastosFijos = sumPaid("Gasto fijo");
   const totalGastosVariables = sumPaid("Gasto variable") + sumPaid("Gasto extraordinario");
   const totalDeudas = sumPaid("Deuda");
   const totalAhorro = sumPaid("Ahorro");
-  const totalPagado = rows.reduce((sum, item) => sum + toNumber(item.valorPagado), 0);
-  const totalPresupuestado = rows.reduce((sum, item) => sum + toNumber(item.valorPresupuestado), 0);
-  const totalFaltante = totalPresupuestado - totalPagado;
-  const saldoDisponible = totalIngresos - totalGastosFijos - totalGastosVariables - totalDeudas - totalAhorro;
+  const totalPagado = [...ingresos, ...gastos].reduce((sum, item) => sum + financialAmounts(item).paid, 0);
+  const totalPresupuestado = [...ingresos, ...gastos].reduce((sum, item) => sum + financialAmounts(item).total, 0);
+  const totalFaltante = [...ingresos, ...gastos].reduce((sum, item) => sum + financialAmounts(item).remaining, 0);
 
   return {
-    totalIngresos,
+    ...financial,
     totalGastosFijos,
     totalGastosVariables,
     totalDeudas,
@@ -257,41 +424,397 @@ export function calculateMonthlySummary(state, year, month) {
     totalPresupuestado,
     totalPagado,
     totalFaltante,
-    saldoDisponible,
     porcentajeEjecucion: safePercent(totalPagado, totalPresupuestado),
-    nivelEndeudamiento: safePercent(totalDeudas, totalIngresos),
-    porcentajeAhorro: safePercent(totalAhorro, totalIngresos),
+    nivelEndeudamiento: safePercent(totalDeudas, financial.totalIngresos),
+    porcentajeAhorro: safePercent(totalAhorro, financial.totalIngresos),
     movimientos: rows.length,
   };
 }
 
-export function validateBackup(payload) {
-  if (!payload || typeof payload !== "object") return { ok: false, message: "El archivo no contiene un objeto JSON valido." };
-  const required = ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro", "settings"];
-  const missing = required.filter((key) => !(key in payload));
-  if (missing.length) return { ok: false, message: `Faltan secciones requeridas: ${missing.join(", ")}.` };
-  const invalidArrays = ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"].filter((key) => !Array.isArray(payload[key]));
-  if (invalidArrays.length) return { ok: false, message: `Estas secciones deben ser listas: ${invalidArrays.join(", ")}.` };
-  return { ok: true, message: "Respaldo valido." };
+export function buildDashboardData(state, year, month, now = new Date()) {
+  const summary = calculateMonthlySummary(state, year, month, now);
+  const rows = getMonthlyMovements(state, year, month)
+    .filter((item) => !["Ingreso", "Transferencia interna"].includes(item.tipo));
+  const incomeRows = (state.presupuestos || []).filter((item) =>
+    Number(item.anio) === Number(year)
+    && item.mes === month
+    && (item.tipo === "Ingreso" || (!item.tipo && state.settings?.appMode === "simple-v2")),
+  );
+  const incomeIds = new Set(incomeRows.map((item) => item.id));
+  const incomeMovementRows = getMonthlyMovements(state, year, month)
+    .filter((item) => item.tipo === "Ingreso" && !incomeIds.has(item.id));
+  const expensesByCategory = new Map();
+  const obligations = {
+    pagadas: { count: 0, amount: 0 },
+    pendientes: { count: 0, amount: 0 },
+    parciales: { count: 0, amount: 0 },
+  };
+  let overdueCount = 0;
+
+  rows.forEach((row) => {
+    const amounts = financialAmounts(row);
+    const category = row.categoria || "Otros gastos";
+    const categoryData = expensesByCategory.get(category) || { categoria: category, total: 0, pagado: 0, pendiente: 0 };
+    categoryData.total += amounts.total;
+    categoryData.pagado += amounts.paid;
+    categoryData.pendiente += amounts.remaining;
+    expensesByCategory.set(category, categoryData);
+
+    if (amounts.remaining === 0) {
+      obligations.pagadas.count += 1;
+      obligations.pagadas.amount += amounts.total;
+    } else if (amounts.paid > 0) {
+      obligations.parciales.count += 1;
+      obligations.parciales.amount += amounts.total;
+    } else {
+      obligations.pendientes.count += 1;
+      obligations.pendientes.amount += amounts.total;
+    }
+    if (getMovementStatus(row, now) === "Vencido") overdueCount += 1;
+  });
+
+  const categoryTotal = [...expensesByCategory.values()].reduce((sum, item) => sum + item.total, 0);
+  const categories = [...expensesByCategory.values()]
+    .sort((left, right) => right.total - left.total)
+    .map((item) => ({ ...item, share: safePercent(item.total, categoryTotal) }));
+  const obligationTotal = Object.values(obligations).reduce((sum, item) => sum + item.amount, 0);
+  const obligationStates = Object.entries(obligations).map(([status, item]) => ({
+    status,
+    ...item,
+    share: safePercent(item.amount, obligationTotal),
+  }));
+
+  const selectedPeriod = periodKey(year, month);
+  const [selectedYear, selectedMonth] = selectedPeriod.split("-").map(Number);
+  const history = Array.from({ length: 6 }, (_, offset) => {
+    const date = new Date(selectedYear, selectedMonth - 1 - (5 - offset), 1);
+    const periodYear = date.getFullYear();
+    const periodMonth = MONTHS[date.getMonth()];
+    const periodSummary = calculateMonthlySummary(state, periodYear, periodMonth, now);
+    return {
+      year: periodYear,
+      month: periodMonth,
+      label: `${periodMonth.slice(0, 3)} ${String(periodYear).slice(-2)}`,
+      ingresos: periodSummary.totalIngresos,
+      pagos: periodSummary.gastosEfectivamentePagados,
+      disponible: periodSummary.saldoDisponible,
+      proyectado: periodSummary.saldoProyectado,
+    };
+  });
+  const historyScale = Math.max(0, ...history.flatMap((item) => [item.ingresos, item.pagos, item.disponible, item.proyectado].map(Math.abs)));
+  const historyWithWidths = history.map((item) => ({
+    ...item,
+    widths: {
+      ingresos: safePercent(Math.abs(item.ingresos), historyScale),
+      pagos: safePercent(Math.abs(item.pagos), historyScale),
+      disponible: safePercent(Math.abs(item.disponible), historyScale),
+      proyectado: safePercent(Math.abs(item.proyectado), historyScale),
+    },
+  }));
+  const committedAmount = summary.gastosEfectivamentePagados + summary.obligacionesPendientes;
+  const committedPercentage = safePercent(committedAmount, summary.totalIngresos);
+  const alerts = [];
+  if (incomeRows.length + incomeMovementRows.length === 0) {
+    alerts.push({ type: "info", message: "Aún no hay ingresos registrados para este periodo." });
+  }
+  if (summary.saldoProyectado < 0) {
+    alerts.push({ type: "danger", message: "Con las obligaciones actuales, el saldo proyectado queda por debajo de cero." });
+  }
+  if (overdueCount > 0) {
+    alerts.push({ type: "warning", message: `${overdueCount} obligación(es) tienen saldo pendiente y fecha límite vencida.` });
+  }
+  if (summary.totalIngresos > 0 && committedAmount > summary.totalIngresos) {
+    alerts.push({ type: "warning", message: "Los pagos y obligaciones pendientes superan los ingresos recibidos del periodo." });
+  }
+  if (summary.totalIngresos > 0 && summary.saldoProyectado >= 0 && summary.saldoProyectado <= summary.totalIngresos * 0.1) {
+    alerts.push({ type: "warning", message: "El saldo proyectado es reducido frente a los ingresos recibidos." });
+  }
+
+  return {
+    summary,
+    categories,
+    obligationStates,
+    overdueCount,
+    committedAmount,
+    committedPercentage,
+    history: historyWithWidths,
+    alerts,
+  };
 }
 
-function mergeList(current = [], incoming = []) {
-  const seen = new Set(current.map((item) => item.id));
-  return [...current, ...incoming.filter((item) => !seen.has(item.id))];
+export function calculateFinancialSummary(incomeRows = [], expenseRows = [], now = new Date()) {
+  const totalIngresos = incomeRows.reduce((sum, item) => sum + financialAmounts(item).paid, 0);
+  const gastosEfectivamentePagados = expenseRows.reduce((sum, item) => sum + financialAmounts(item).paid, 0);
+  const obligacionesPendientes = expenseRows.reduce((sum, item) => {
+    return sum + financialAmounts(item).remaining;
+  }, 0);
+  const saldoDisponible = totalIngresos - gastosEfectivamentePagados;
+  return {
+    totalIngresos,
+    ingresosRecibidos: totalIngresos,
+    gastosEfectivamentePagados,
+    obligacionesPendientes,
+    saldoDisponible,
+    saldoProyectado: saldoDisponible - obligacionesPendientes,
+    estados: expenseRows.map((item) => getStatus(
+      financialAmounts(item).total,
+      financialAmounts(item).paid,
+      item.fechaLimite,
+      now,
+    )),
+  };
+}
+export function validateBackup(payload) {
+  if (!isPlainObject(payload)) return { ok: false, message: "El archivo no contiene un objeto JSON valido." };
+  const data = isPlainObject(payload.data) ? payload.data : payload;
+  const version = Number(payload.schemaVersion ?? data.schemaVersion ?? data.version ?? 1);
+  if (!Number.isInteger(version) || version < 1) return { ok: false, message: "La version del respaldo no es valida." };
+  if (version > DATA_SCHEMA_VERSION) return { ok: false, message: `El respaldo usa una version (${version}) mas reciente que esta aplicacion.` };
+  if (payload.data !== undefined && !isPlainObject(payload.data)) return { ok: false, message: "La seccion data del respaldo no es valida." };
+  if (payload.generatedAt !== undefined && (typeof payload.generatedAt !== "string" || Number.isNaN(Date.parse(payload.generatedAt)))) {
+    return { ok: false, message: "La fecha de generacion del respaldo no es valida." };
+  }
+  if (payload.app !== undefined && typeof payload.app !== "string") return { ok: false, message: "El nombre de la aplicacion en el respaldo no es valido." };
+  if (!isPlainObject(data.settings)) return { ok: false, message: "Falta una configuracion valida en el respaldo." };
+
+  const listNames = ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"];
+  for (const name of listNames) {
+    if (data[name] !== undefined && !Array.isArray(data[name])) return { ok: false, message: `La seccion ${name} debe ser una lista.` };
+    const rows = data[name] || [];
+    const ids = new Set();
+    for (const row of rows) {
+      if (!isPlainObject(row)) return { ok: false, message: `La seccion ${name} contiene un registro invalido.` };
+      if (row.id !== undefined && (typeof row.id !== "string" || !row.id.trim())) return { ok: false, message: `La seccion ${name} contiene un identificador invalido.` };
+      for (const field of ["fecha", "fechaLimite", "tipo", "categoria", "descripcion", "concepto", "estado", "nombre", "entidad", "responsable", "observacion", "mes"]) {
+        if (row[field] !== undefined && row[field] !== null && typeof row[field] !== "string") {
+          return { ok: false, message: `El campo ${field} tiene un tipo invalido en ${name}.` };
+        }
+      }
+      if (row.anio !== undefined && (!Number.isFinite(Number(row.anio)) || Number(row.anio) < 1)) {
+        return { ok: false, message: `El campo anio tiene un valor invalido en ${name}.` };
+      }
+      if (row.id && ids.has(row.id)) return { ok: false, message: `El respaldo contiene identificadores duplicados en ${name}.` };
+      if (row.id) ids.add(row.id);
+      for (const field of ["valorPresupuestado", "valorPagado", "valorFaltante", "faltante", "valorObjetivo", "valorAhorrado", "saldoInicial", "saldoActual", "cuotaMensual"]) {
+        const value = row[field];
+        if (value !== undefined && value !== null && value !== "" && (!Number.isFinite(Number(value)) || Number(value) < 0)) {
+          return { ok: false, message: `El campo ${field} contiene un importe invalido en ${name}.` };
+        }
+      }
+    }
+  }
+  const ingresos = data.ingresos ?? (payload.data ? payload.ingresos : undefined);
+  const gastos = data.gastos ?? (payload.data ? payload.gastos : undefined);
+  if (ingresos !== undefined && !Array.isArray(ingresos)) return { ok: false, message: "La seccion ingresos debe ser una lista." };
+  if (gastos !== undefined && !Array.isArray(gastos)) return { ok: false, message: "La seccion gastos debe ser una lista." };
+  for (const [name, rows] of [["ingresos", ingresos], ["gastos", gastos]]) {
+    if (!rows) continue;
+    const ids = new Set();
+    for (const row of rows) {
+      if (!isPlainObject(row)) return { ok: false, message: `La seccion ${name} contiene un registro invalido.` };
+      if (row.id !== undefined && (typeof row.id !== "string" || !row.id.trim())) return { ok: false, message: `La seccion ${name} contiene un identificador invalido.` };
+      if (row.id && ids.has(row.id)) return { ok: false, message: `El respaldo contiene identificadores duplicados en ${name}.` };
+      if (row.id) ids.add(row.id);
+      for (const field of ["valorPresupuestado", "valorPagado", "valorFaltante", "faltante"]) {
+        const value = row[field];
+        if (value !== undefined && value !== null && value !== "" && (!Number.isFinite(Number(value)) || Number(value) < 0)) {
+          return { ok: false, message: `El campo ${field} contiene un importe invalido en ${name}.` };
+        }
+      }
+    }
+  }
+  for (const [alias, rows, canonical] of [["ingresos", ingresos, "presupuestos"], ["gastos", gastos, "movimientos"]]) {
+    if (!Array.isArray(rows) || !Array.isArray(data[canonical])) continue;
+    const canonicalById = new Map(data[canonical].filter((row) => row.id).map((row) => [row.id, row]));
+    for (const row of rows) {
+      const counterpart = row.id ? canonicalById.get(row.id) : null;
+      if (counterpart && stableStringify(row) !== stableStringify(counterpart)) {
+        return { ok: false, message: `El registro ${row.id} tiene contenidos diferentes entre ${alias} y ${canonical}.` };
+      }
+    }
+  }
+  if (!listNames.some((name) => (data[name] || []).length) && !Array.isArray(ingresos) && !Array.isArray(gastos)) {
+    return { ok: false, message: "El respaldo no contiene secciones financieras reconocibles." };
+  }
+  return { ok: true, message: "Respaldo valido.", schemaVersion: version, data };
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function legacyId(collection, row, index) {
+  const text = stableStringify(row);
+  let hash = 2166136261;
+  for (let position = 0; position < text.length; position += 1) {
+    hash ^= text.charCodeAt(position);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `legacy_${collection}_${index}_${(hash >>> 0).toString(16)}`;
+}
+
+export function migrateData(input, sourceVersion = input?.schemaVersion ?? input?.version ?? 1, migratedAt = new Date().toISOString()) {
+  let data = JSON.parse(JSON.stringify(input));
+  let version = Number(sourceVersion) || 1;
+  const migrations = [...(Array.isArray(data.migrationHistory) ? data.migrationHistory : [])];
+  while (version < DATA_SCHEMA_VERSION) {
+    const nextVersion = version + 1;
+    if (version === 1 && nextVersion === 2) {
+      data.schemaVersion = 2;
+      data.version = 2;
+    }
+    migrations.push({ from: version, to: nextVersion, migratedAt });
+    version = nextVersion;
+  }
+  data.schemaVersion = version;
+  data.version = version;
+  if (migrations.length) data.migrationHistory = migrations;
+  return data;
+}
+
+export function createBackup(state, generatedAt = new Date().toISOString()) {
+  const data = JSON.parse(JSON.stringify(state));
+  data.schemaVersion = DATA_SCHEMA_VERSION;
+  data.version = DATA_SCHEMA_VERSION;
+  return {
+    app: "App_Finanzas",
+    schemaVersion: DATA_SCHEMA_VERSION,
+    generatedAt,
+    data,
+    ingresos: (data.presupuestos || []).filter((item) => item.tipo === "Ingreso"),
+    gastos: data.movimientos || [],
+  };
+}
+
+export function extractBackupData(payload) {
+  const validation = validateBackup(payload);
+  if (!validation.ok) throw new Error(validation.message);
+  const source = validation.data;
+  const data = { ...source };
+  if (data.ingresos === undefined && payload.data) data.ingresos = payload.ingresos;
+  if (data.gastos === undefined && payload.data) data.gastos = payload.gastos;
+  if (!Array.isArray(data.presupuestos)) data.presupuestos = [];
+  else data.presupuestos = [...data.presupuestos];
+  if (!Array.isArray(data.movimientos)) data.movimientos = [];
+  else data.movimientos = [...data.movimientos];
+  const movementIds = new Set(data.movimientos.map((item) => item.id).filter(Boolean));
+  for (const expense of [...(data.gastos || [])]) {
+    if (expense.id && movementIds.has(expense.id)) continue;
+    if (!expense.id && data.movimientos.some((item) => stableStringify(item) === stableStringify(expense))) continue;
+    data.movimientos.push(expense);
+    if (expense.id) movementIds.add(expense.id);
+  }
+  const budgetIds = new Set(data.presupuestos.map((item) => item.id).filter(Boolean));
+  for (const income of [...(data.ingresos || [])]) {
+    if (income.id && budgetIds.has(income.id)) continue;
+    if (!income.id && data.presupuestos.some((item) => stableStringify(item) === stableStringify({ ...income, tipo: "Ingreso" }))) continue;
+    data.presupuestos.push({ ...income, tipo: "Ingreso" });
+    if (income.id) budgetIds.add(income.id);
+  }
+  if (!data.categorias) data.categorias = [];
+  if (!data.deudas) data.deudas = [];
+  if (!data.metasAhorro) data.metasAhorro = [];
+  if (!data.settings) data.settings = {};
+  for (const name of ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"]) {
+    data[name] = data[name].map((item, index) => item.id ? item : { ...item, id: legacyId(name, item, index) });
+  }
+  delete data.ingresos;
+  delete data.gastos;
+  return migrateData(data, validation.schemaVersion);
 }
 
 export function mergeBackup(current, incoming) {
-  const merged = {
+  const validation = validateBackup(incoming);
+  if (!validation.ok) throw new Error(validation.message);
+  const incomingData = extractBackupData(incoming);
+  const collections = ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"];
+  const added = {};
+  const duplicates = [];
+  const conflicts = [];
+  const merged = { ...current, settings: current.settings, updatedAt: new Date().toISOString() };
+
+  for (const name of collections) {
+    const rows = [...(current[name] || [])];
+    const byId = new Map(rows.filter((item) => item.id).map((item) => [item.id, item]));
+    let count = 0;
+    for (const item of incomingData[name] || []) {
+      const existing = item.id ? byId.get(item.id) : null;
+      if (!existing) {
+        rows.push(item);
+        if (item.id) byId.set(item.id, item);
+        count += 1;
+      } else if (stableStringify(existing) === stableStringify(item)) {
+        duplicates.push({ collection: name, id: item.id, type: "identical" });
+      } else {
+        conflicts.push({ collection: name, id: item.id, current: existing, incoming: item });
+      }
+    }
+    merged[name] = rows;
+    added[name] = count;
+  }
+  merged.schemaVersion = DATA_SCHEMA_VERSION;
+  merged.version = DATA_SCHEMA_VERSION;
+  return { state: merged, added, duplicates, conflicts, settingsConflict: stableStringify(current.settings) !== stableStringify(incomingData.settings) };
+}
+
+export function restoreBackup(incoming) {
+  return extractBackupData(incoming);
+}
+
+export function backupCounts(payload) {
+  const validation = validateBackup(payload);
+  if (!validation.ok) return { ok: false, message: validation.message };
+  const data = extractBackupData(payload);
+  return {
+    ok: true,
+    schemaVersion: validation.schemaVersion,
+    generatedAt: payload.generatedAt || null,
+    ingresos: (data.presupuestos || []).filter((item) => item.tipo === "Ingreso").length,
+    gastos: (data.movimientos || []).length,
+    presupuestos: (data.presupuestos || []).length,
+    categorias: (data.categorias || []).length,
+    deudas: (data.deudas || []).length,
+    metasAhorro: (data.metasAhorro || []).length,
+  };
+}
+
+export function archiveStorageValue(storage, rawValue, archivedAt = Date.now()) {
+  let suffix = archivedAt;
+  let key = `${MIGRATION_ARCHIVE_PREFIX}${suffix}`;
+  while (storage.getItem(key) !== null) {
+    suffix += 1;
+    key = `${MIGRATION_ARCHIVE_PREFIX}${suffix}`;
+  }
+  storage.setItem(key, rawValue);
+  return key;
+}
+
+export function storageErrorMessage(error) {
+  if (error?.name === "QuotaExceededError" || error?.code === 22 || error?.code === 1014) {
+    return "No hay espacio suficiente en el almacenamiento local. Descarga un respaldo y libera espacio antes de volver a guardar.";
+  }
+  return "No fue posible guardar los datos en este navegador. Tus cambios no se confirmaron como guardados.";
+}
+
+/*
+ * Keep a named wrapper in the API so restoration and merge always use the same validated envelope.
+ */
+export function restoreStateFromBackup(current, incoming) {
+  return {
     ...current,
-    settings: { ...current.settings, ...incoming.settings },
-    movimientos: mergeList(current.movimientos, incoming.movimientos),
-    presupuestos: mergeList(current.presupuestos, incoming.presupuestos),
-    categorias: mergeList(current.categorias, incoming.categorias),
-    deudas: mergeList(current.deudas, incoming.deudas),
-    metasAhorro: mergeList(current.metasAhorro, incoming.metasAhorro),
+    ...restoreBackup(incoming),
+    schemaVersion: DATA_SCHEMA_VERSION,
+    version: DATA_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
   };
-  return merged;
 }
 
 export function generateCsv(rows) {
@@ -310,12 +833,13 @@ export function buildReports(state, year, month) {
   const categorias = Object.values(mensual.reduce((acc, item) => {
     const key = item.categoria || "Sin categoria";
     acc[key] ||= { categoria: key, valorPresupuestado: 0, valorPagado: 0, faltante: 0 };
-    acc[key].valorPresupuestado += toNumber(item.valorPresupuestado);
-    acc[key].valorPagado += toNumber(item.valorPagado);
-    acc[key].faltante += toNumber(item.valorFaltante);
+    const amounts = financialAmounts(item);
+    acc[key].valorPresupuestado += amounts.total;
+    acc[key].valorPagado += amounts.paid;
+    acc[key].faltante += amounts.remaining;
     return acc;
   }, {}));
-  const pendientes = mensual.filter((item) => ["Pendiente", "Parcial", "Vencido"].includes(item.estado));
+  const pendientes = mensual.filter((item) => getMovementStatus(item) !== "Pagado");
   const ahorro = (state.metasAhorro || []).map(normalizeGoal);
 
   return {
@@ -334,13 +858,14 @@ export function getAlerts(state, year, month, now = new Date()) {
   const summary = calculateMonthlySummary(state, year, month);
 
   mensual.forEach((item) => {
-    if (item.estado === "Pendiente" || item.estado === "Parcial") {
+    const status = getMovementStatus(item, now);
+    if (status === "Pendiente" || status === "Parcial") {
       alerts.push({ type: "warning", message: `Pago pendiente: ${item.descripcion || item.categoria}` });
     }
-    if (item.estado === "Vencido") {
+    if (status === "Vencido") {
       alerts.push({ type: "danger", message: `Pago vencido: ${item.descripcion || item.categoria}` });
     }
-    if (toNumber(item.valorPagado) > toNumber(item.valorPresupuestado) && toNumber(item.valorPresupuestado) > 0) {
+    if (financialAmounts(item).paid > financialAmounts(item).total && financialAmounts(item).total > 0) {
       alerts.push({ type: "danger", message: `Gasto excedido frente al presupuesto: ${item.categoria}` });
     }
   });
