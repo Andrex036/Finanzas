@@ -1,5 +1,5 @@
 export const STORAGE_KEY = "finanzas_personales_v1";
-export const DATA_SCHEMA_VERSION = 2;
+export const DATA_SCHEMA_VERSION = 3;
 export const MIGRATION_ARCHIVE_PREFIX = `${STORAGE_KEY}_migration_backup_`;
 
 export const MONTHS = [
@@ -29,6 +29,23 @@ export const MOVEMENT_TYPES = [
 
 export const STATUS_OPTIONS = ["Pendiente", "Pagado", "Parcial", "Vencido"];
 export const FINANCIAL_MODEL_VERSION = 2;
+export const SAVINGS_SCENARIOS = {
+  conservador: 0.25,
+  equilibrado: 0.5,
+  ambicioso: 0.75,
+};
+export const SAVINGS_DESTINATION_TYPES = [
+  "Cuenta de ahorros",
+  "Cuenta remunerada",
+  "CDT",
+  "Fondo de inversión colectiva",
+  "Fondo de ahorro programado",
+  "Fondo de empleados",
+  "Cuenta AFC",
+  "Billetera digital",
+  "Efectivo",
+  "Otro",
+];
 
 export const PAYMENT_METHODS = [
   "Efectivo",
@@ -337,13 +354,444 @@ export function normalizeGoal(input = {}) {
   const valorObjetivo = toNumber(input.valorObjetivo);
   const valorAhorrado = toNumber(input.valorAhorrado);
   return {
+    ...input,
     id: input.id || id("aho"),
     nombre: input.nombre || "",
+    descripcion: input.descripcion || "",
+    categoria: input.categoria || "General",
+    icono: input.icono || "🎯",
     valorObjetivo,
     valorAhorrado,
+    fechaCreacion: input.fechaCreacion || "",
     fechaObjetivo: input.fechaObjetivo || "",
+    aporteMensualPlanificado: toMoney(input.aporteMensualPlanificado),
+    estado: input.estado || "Activa",
+    destinosFinancieros: Array.isArray(input.destinosFinancieros) ? [...input.destinosFinancieros] : [],
     porcentajeAvance: safePercent(valorAhorrado, valorObjetivo),
     observacion: input.observacion || "",
+  };
+}
+
+export function normalizeSavingsPlan(input = {}) {
+  const mode = ["fijo", "porcentual", "inteligente"].includes(input.modalidad) ? input.modalidad : "fijo";
+  const percentageBasis = input.basePorcentual === "presupuestado" ? "presupuestado" : "recibido";
+  const monthlyAmount = toMoney(input.importeMensual);
+  const percentage = Math.min(100, Math.max(0, toNumber(input.porcentaje)));
+  const scenario = Object.hasOwn(SAVINGS_SCENARIOS, input.escenario) ? input.escenario : "equilibrado";
+  const status = ["Activo", "Pausado"].includes(input.estado) ? input.estado : "Activo";
+  return {
+    ...input,
+    id: input.id || id("plan"),
+    nombre: String(input.nombre || "Plan de ahorro"),
+    modalidad: mode,
+    importeMensual: monthlyAmount,
+    porcentaje: percentage,
+    basePorcentual: percentageBasis,
+    escenario: scenario,
+    reservaSeguridad: toMoney(input.reservaSeguridad),
+    estado: status,
+    fechaCreacion: input.fechaCreacion || new Date().toISOString().slice(0, 10),
+  };
+}
+
+export function normalizeSavingsGoal(input = {}) {
+  const legacy = normalizeGoal(input);
+  const goalStatus = ["Activa", "Pausada", "Completada", "Cancelada"].includes(input.estado) ? input.estado : "Activa";
+  const openingBalance = input.saldoInicialReconocido === undefined
+    ? toMoney(input.valorAhorrado)
+    : toMoney(input.saldoInicialReconocido);
+  return {
+    ...legacy,
+    descripcion: String(input.descripcion || ""),
+    categoria: String(input.categoria || "General"),
+    icono: String(input.icono || "🎯"),
+    valorObjetivo: toMoney(input.valorObjetivo),
+    valorAhorrado: openingBalance,
+    saldoInicialReconocido: openingBalance,
+    fechaCreacion: input.fechaCreacion || new Date().toISOString().slice(0, 10),
+    fechaObjetivo: String(input.fechaObjetivo || ""),
+    aporteMensualPlanificado: toMoney(input.aporteMensualPlanificado),
+    estado: goalStatus,
+    destinosFinancieros: Array.isArray(input.destinosFinancieros) ? [...input.destinosFinancieros] : [],
+  };
+}
+
+export function normalizeSavingsDistribution(input = {}) {
+  return {
+    ...input,
+    id: input.id || id("dist"),
+    anio: Number(input.anio) || new Date().getFullYear(),
+    mes: MONTHS.includes(String(input.mes).toLowerCase()) ? String(input.mes).toLowerCase() : MONTHS[new Date().getMonth()],
+    presupuestoMensual: toMoney(input.presupuestoMensual),
+    asignaciones: Array.isArray(input.asignaciones) ? input.asignaciones.map((entry) => ({
+      metaId: String(entry.metaId || ""),
+      porcentaje: Math.max(0, toNumber(entry.porcentaje)),
+    })) : [],
+  };
+}
+
+export function normalizeFinancialDestination(input = {}) {
+  const type = SAVINGS_DESTINATION_TYPES.includes(input.tipoProducto) ? input.tipoProducto : "Otro";
+  const capitalization = Math.max(1, Math.floor(toNumber(input.capitalizacionPorAnio) || 12));
+  return {
+    ...input,
+    id: input.id || id("dest"),
+    nombre: String(input.nombre || ""),
+    entidad: String(input.entidad || ""),
+    tipoProducto: type,
+    moneda: String(input.moneda || "COP"),
+    tasaAnual: Math.max(-100, toNumber(input.tasaAnual)),
+    tipoTasa: input.tipoTasa === "nominal" ? "nominal" : "efectiva",
+    capitalizacionPorAnio: capitalization,
+    liquidez: String(input.liquidez || "No especificada"),
+    plazoMeses: Math.max(0, Math.floor(toNumber(input.plazoMeses))),
+    fechaApertura: String(input.fechaApertura || ""),
+    fechaVencimiento: String(input.fechaVencimiento || ""),
+    costosMensuales: toMoney(input.costosMensuales),
+    costoApertura: toMoney(input.costoApertura),
+    saldoDeclarado: toMoney(input.saldoDeclarado),
+    capitalAportado: toMoney(input.capitalAportado),
+    permiteAportesDuranteVigencia: type === "CDT" ? Boolean(input.permiteAportesDuranteVigencia) : true,
+    observaciones: String(input.observaciones || ""),
+  };
+}
+
+export function normalizeScheduledSavings(input = {}) {
+  return {
+    ...input,
+    id: input.id || id("prog"),
+    importePrevisto: toMoney(input.importePrevisto),
+    fechaProgramada: String(input.fechaProgramada || ""),
+    planId: String(input.planId || ""),
+    metaId: String(input.metaId || ""),
+    destinoId: String(input.destinoId || ""),
+    importeTransferido: toMoney(input.importeTransferido),
+    estado: ["Programado", "Pendiente", "Parcial", "Transferido", "Vencido", "Cancelado"].includes(input.estado)
+      ? input.estado
+      : "Programado",
+    observaciones: String(input.observaciones || ""),
+  };
+}
+
+export function normalizeSavingsTransfer(input = {}) {
+  return {
+    ...input,
+    id: input.id || id("tran"),
+    aporteProgramadoId: String(input.aporteProgramadoId || ""),
+    planId: String(input.planId || ""),
+    metaId: String(input.metaId || ""),
+    destinoId: String(input.destinoId || ""),
+    importe: toMoney(input.importe),
+    fechaEfectiva: String(input.fechaEfectiva || ""),
+    referencia: String(input.referencia || ""),
+    observaciones: String(input.observaciones || ""),
+    estado: input.estado === "Cancelada" ? "Cancelada" : "Confirmada",
+  };
+}
+
+export function normalizeSavingsWithdrawal(input = {}) {
+  return {
+    ...input,
+    id: input.id || id("retiro"),
+    metaId: String(input.metaId || ""),
+    destinoId: String(input.destinoId || ""),
+    importe: toMoney(input.importe),
+    fechaEfectiva: String(input.fechaEfectiva || ""),
+    motivo: String(input.motivo || ""),
+    estado: input.estado === "Cancelado" ? "Cancelado" : "Confirmado",
+  };
+}
+
+export function calculateSavingsPlanAmount(state, year, month, plan) {
+  const normalized = normalizeSavingsPlan(plan);
+  const financial = calculateMonthlySummary(state, year, month);
+  const budgetRows = (state.presupuestos || []).filter((item) =>
+    Number(item.anio) === Number(year)
+    && item.mes === month
+    && (item.tipo === "Ingreso" || (!item.tipo && state.settings?.appMode === "simple-v2")),
+  );
+  const incomeRows = [
+    ...budgetRows,
+    ...getMonthlyMovements(state, year, month).filter((item) => item.tipo === "Ingreso"),
+  ];
+  const receivedIncome = financial.totalIngresos;
+  const budgetedIncome = incomeRows.reduce((sum, item) => sum + financialAmounts(item).total, 0);
+  if (normalized.modalidad === "fijo") {
+    return {
+      amount: normalized.importeMensual,
+      capacity: Math.max(0, financial.saldoProyectado),
+      affordable: normalized.importeMensual <= financial.saldoProyectado,
+    };
+  }
+  if (normalized.modalidad === "porcentual") {
+    const base = normalized.basePorcentual === "presupuestado" ? budgetedIncome : receivedIncome;
+    const amount = toMoney(base * normalized.porcentaje / 100);
+    return { amount, capacity: Math.max(0, financial.saldoProyectado), affordable: amount <= financial.saldoProyectado, base };
+  }
+
+  const otherPlanCommitments = (state.planesAhorro || [])
+    .filter((other) => other.id !== normalized.id && other.estado !== "Pausado")
+    .reduce((sum, other) => {
+      if (other.modalidad === "fijo") return sum + toMoney(other.importeMensual);
+      if (other.modalidad === "porcentual") {
+        const base = other.basePorcentual === "presupuestado" ? budgetedIncome : receivedIncome;
+        return sum + toMoney(base * toNumber(other.porcentaje) / 100);
+      }
+      return sum + toMoney(other.importeMensual);
+    }, 0);
+  const scheduledCommitments = (state.aportesProgramados || [])
+    .filter((item) => item.estado !== "Cancelado"
+      && !item.planId
+      && String(item.fechaProgramada || "").startsWith(periodKey(year, month)))
+    .reduce((sum, item) => sum + Math.max(0, toMoney(item.importePrevisto) - toMoney(item.importeTransferido)), 0);
+  const capacity = Math.max(
+    0,
+    financial.saldoProyectado - normalized.reservaSeguridad - otherPlanCommitments - scheduledCommitments,
+  );
+  return {
+    amount: toMoney(capacity * SAVINGS_SCENARIOS[normalized.escenario]),
+    capacity,
+    affordable: true,
+  };
+}
+
+export function calculateSavingsDistribution(distribution, goals) {
+  const normalized = normalizeSavingsDistribution(distribution);
+  const goalIds = new Set();
+  let percentageTotal = 0;
+  const allocations = normalized.asignaciones.map((assignment) => {
+    if (goalIds.has(assignment.metaId)) throw new Error(`La meta ${assignment.metaId} aparece mas de una vez en la distribucion.`);
+    goalIds.add(assignment.metaId);
+    percentageTotal += assignment.porcentaje;
+    const goal = goals.find((item) => item.id === assignment.metaId);
+    return {
+      metaId: assignment.metaId,
+      nombre: goal?.nombre || "Meta no disponible",
+      porcentaje: assignment.porcentaje,
+      importe: toMoney(normalized.presupuestoMensual * assignment.porcentaje / 100),
+      encontrada: Boolean(goal),
+    };
+  });
+  if (percentageTotal > 100) throw new Error("La distribucion del ahorro no puede superar el 100 %.");
+  const allocated = allocations.reduce((sum, item) => sum + item.importe, 0);
+  return {
+    ...normalized,
+    porcentajeDistribuido: round2(percentageTotal),
+    porcentajeSinDistribuir: round2(100 - percentageTotal),
+    importeDistribuido: allocated,
+    importeSinDistribuir: Math.max(0, normalized.presupuestoMensual - allocated),
+    allocations,
+  };
+}
+
+function confirmedTransfers(state) {
+  return (state.transferenciasAhorro || []).filter((transfer) => transfer.estado !== "Cancelada");
+}
+
+function confirmedWithdrawals(state) {
+  return (state.retirosAhorro || []).filter((withdrawal) => withdrawal.estado !== "Cancelado");
+}
+
+export function savingsCommitmentStatus(commitment, transfers = [], today = new Date()) {
+  if (commitment.estado === "Cancelado") return "Cancelado";
+  const paid = transfers
+    .filter((transfer) => transfer.aporteProgramadoId === commitment.id && transfer.estado !== "Cancelada")
+    .reduce((sum, transfer) => sum + toMoney(transfer.importe), 0);
+  const remaining = Math.max(0, toMoney(commitment.importePrevisto) - paid);
+  if (toMoney(commitment.importePrevisto) > 0 && remaining === 0) return "Transferido";
+  if (paid > 0) return "Parcial";
+  const dueDate = String(commitment.fechaProgramada || "");
+  if (dueDate && dueDate < today.toISOString().slice(0, 10)) return "Vencido";
+  if (dueDate && dueDate <= today.toISOString().slice(0, 10)) return "Pendiente";
+  return "Programado";
+}
+
+export function registerSavingsTransfer(state, input, makeId = () => id("tran")) {
+  const commitment = (state.aportesProgramados || []).find((item) => item.id === input.aporteProgramadoId);
+  if (!commitment) throw new Error("No se encontro el aporte programado.");
+  if (commitment.estado === "Cancelado") throw new Error("No se pueden registrar transferencias en un aporte cancelado.");
+  if (input.destinoId && !(state.destinosFinancieros || []).some((destination) => destination.id === input.destinoId)) {
+    throw new Error("El destino financiero seleccionado no existe.");
+  }
+  const amount = toMoney(input.importe);
+  if (!amount) throw new Error("El importe transferido debe ser mayor que cero.");
+  const transfers = confirmedTransfers(state);
+  if (input.id && (state.transferenciasAhorro || []).some((transfer) => transfer.id === input.id)) {
+    throw new Error("El identificador de transferencia ya existe.");
+  }
+  const reference = String(input.referencia || "").trim();
+  if (reference && transfers.some((transfer) =>
+    transfer.destinoId === commitment.destinoId
+    && transfer.referencia === reference
+    && toMoney(transfer.importe) === amount
+  )) {
+    throw new Error("Ya existe una transferencia con esa referencia, destino e importe.");
+  }
+  const currentAmount = transfers
+    .filter((transfer) => transfer.aporteProgramadoId === commitment.id)
+    .reduce((sum, transfer) => sum + toMoney(transfer.importe), 0);
+  if (currentAmount + amount > toMoney(commitment.importePrevisto)) {
+    throw new Error("El importe supera el saldo pendiente del aporte programado.");
+  }
+  const transfer = normalizeSavingsTransfer({
+    ...input,
+    id: input.id || makeId(),
+    aporteProgramadoId: commitment.id,
+    planId: input.planId || commitment.planId,
+    metaId: input.metaId || commitment.metaId,
+    destinoId: input.destinoId || commitment.destinoId,
+    importe: amount,
+    estado: "Confirmada",
+  });
+  return { ...state, transferenciasAhorro: [...(state.transferenciasAhorro || []), transfer] };
+}
+
+export function correctSavingsTransfer(state, transferId, correction, makeId = () => id("tran")) {
+  const transfer = (state.transferenciasAhorro || []).find((item) => item.id === transferId);
+  if (!transfer || transfer.estado === "Cancelada") throw new Error("No se encontro una transferencia activa para corregir.");
+  const archivedState = {
+    ...state,
+    transferenciasAhorro: (state.transferenciasAhorro || []).map((item) =>
+      item.id === transferId ? { ...item, estado: "Cancelada", correccionReemplazadaPor: "pendiente" } : item),
+  };
+  const corrected = registerSavingsTransfer(archivedState, {
+    ...transfer,
+    ...correction,
+    id: makeId(),
+    referencia: correction.referencia ?? transfer.referencia,
+    aporteProgramadoId: transfer.aporteProgramadoId,
+    metaId: transfer.metaId,
+    destinoId: transfer.destinoId,
+    planId: transfer.planId,
+    estado: "Confirmada",
+  }, makeId);
+  const replacementId = corrected.transferenciasAhorro.at(-1).id;
+  return {
+    ...corrected,
+    transferenciasAhorro: corrected.transferenciasAhorro.map((item) =>
+      item.id === transferId ? { ...item, correccionReemplazadaPor: replacementId } : item),
+  };
+}
+
+export function annulSavingsTransfer(state, transferId, reason = "") {
+  const found = (state.transferenciasAhorro || []).some((item) => item.id === transferId && item.estado !== "Cancelada");
+  if (!found) throw new Error("No se encontro una transferencia activa para anular.");
+  return {
+    ...state,
+    transferenciasAhorro: state.transferenciasAhorro.map((item) =>
+      item.id === transferId ? { ...item, estado: "Cancelada", observaciones: reason || item.observaciones || "" } : item),
+  };
+}
+
+export function registerSavingsWithdrawal(state, input, makeId = () => id("retiro")) {
+  const goal = (state.metasAhorro || []).find((item) => item.id === input.metaId);
+  if (!goal) throw new Error("No se encontro la meta asociada al retiro.");
+  const amount = toMoney(input.importe);
+  if (!amount) throw new Error("El importe del retiro debe ser mayor que cero.");
+  const goalTransfers = confirmedTransfers(state)
+    .filter((transfer) => transfer.metaId === goal.id)
+    .reduce((sum, transfer) => sum + toMoney(transfer.importe), 0);
+  const goalWithdrawals = confirmedWithdrawals(state)
+    .filter((withdrawal) => withdrawal.metaId === goal.id)
+    .reduce((sum, withdrawal) => sum + toMoney(withdrawal.importe), 0);
+  const openingBalance = goal.saldoInicialReconocido ?? goal.valorAhorrado;
+  const available = toMoney(openingBalance) + goalTransfers - goalWithdrawals;
+  if (amount > available) throw new Error("El retiro supera el ahorro registrado para esta meta.");
+  const withdrawal = normalizeSavingsWithdrawal({ ...input, id: input.id || makeId(), importe: amount });
+  return { ...state, retirosAhorro: [...(state.retirosAhorro || []), withdrawal] };
+}
+
+export function calculateSavingsSummary(state, year, month, now = new Date()) {
+  const confirmed = confirmedTransfers(state);
+  const withdrawals = confirmedWithdrawals(state);
+  const selectedPeriod = periodKey(year, month);
+  const monthlyTransfers = confirmed.filter((item) => String(item.fechaEfectiva || "").startsWith(selectedPeriod));
+  const monthlyWithdrawals = withdrawals.filter((item) => String(item.fechaEfectiva || "").startsWith(selectedPeriod));
+  const savingsFromTransfers = confirmed.reduce((sum, item) => sum + toMoney(item.importe), 0);
+  const totalWithdrawals = withdrawals.reduce((sum, item) => sum + toMoney(item.importe), 0);
+  const recognizedOpeningBalances = (state.metasAhorro || []).reduce((sum, goal) =>
+    sum + toMoney(goal.saldoInicialReconocido ?? goal.valorAhorrado), 0);
+  const savingsAccumulated = Math.max(0, recognizedOpeningBalances + savingsFromTransfers - totalWithdrawals);
+  const periodNetTransfer = monthlyTransfers.reduce((sum, item) => sum + toMoney(item.importe), 0)
+    - monthlyWithdrawals.reduce((sum, item) => sum + toMoney(item.importe), 0);
+  const financial = calculateMonthlySummary(state, year, month, now);
+  const commitments = (state.aportesProgramados || []).map((item) => {
+    const paid = confirmed
+      .filter((transfer) => transfer.aporteProgramadoId === item.id)
+      .reduce((sum, transfer) => sum + toMoney(transfer.importe), 0);
+    return { item, paid, remaining: Math.max(0, toMoney(item.importePrevisto) - paid) };
+  });
+  const monthlySchedules = commitments.filter(({ item }) =>
+    item.estado !== "Cancelado" && String(item.fechaProgramada || "").startsWith(selectedPeriod));
+  const activePlans = (state.planesAhorro || [])
+    .filter((plan) => plan.estado !== "Pausado")
+    .map((plan) => ({
+      plan,
+      amount: calculateSavingsPlanAmount(state, year, month, plan).amount,
+      transferred: monthlyTransfers
+        .filter((item) => item.planId === plan.id)
+        .reduce((sum, item) => sum + toMoney(item.importe), 0),
+      remainingSchedule: monthlySchedules
+        .filter(({ item }) => item.planId === plan.id)
+        .reduce((sum, item) => sum + item.remaining, 0),
+    }));
+  const unlinkedSchedules = monthlySchedules
+    .filter(({ item }) => !activePlans.some(({ plan }) => plan.id === item.planId))
+    .reduce((sum, item) => sum + item.remaining, 0);
+  const unlinkedScheduleProgrammed = monthlySchedules
+    .filter(({ item }) => !activePlans.some(({ plan }) => plan.id === item.planId))
+    .reduce((sum, { item }) => sum + toMoney(item.importePrevisto), 0);
+  const planPending = activePlans.reduce((sum, item) =>
+    sum + Math.max(item.remainingSchedule, item.amount - item.transferred), 0);
+  const planProgrammed = activePlans.reduce((sum, item) =>
+    sum + Math.max(item.amount, item.transferred + item.remainingSchedule), 0);
+
+  const goalBalances = (state.metasAhorro || []).map((goal) => {
+    const deposits = confirmed.filter((item) => item.metaId === goal.id).reduce((sum, item) => sum + toMoney(item.importe), 0);
+    const goalRetirements = withdrawals.filter((item) => item.metaId === goal.id).reduce((sum, item) => sum + toMoney(item.importe), 0);
+    const openingBalance = toMoney(goal.saldoInicialReconocido ?? goal.valorAhorrado);
+    const balance = Math.max(0, openingBalance + deposits - goalRetirements);
+    const normalizedGoal = normalizeSavingsGoal({ ...goal, saldoInicialReconocido: openingBalance });
+    return {
+      id: goal.id,
+      nombre: goal.nombre,
+      estado: goal.estado || normalizedGoal.estado,
+      objetivo: normalizedGoal.valorObjetivo,
+      acumulado: balance,
+      porcentaje: safePercent(balance, normalizedGoal.valorObjetivo),
+      destinosFinancieros: normalizedGoal.destinosFinancieros,
+    };
+  });
+
+  const destinations = (state.destinosFinancieros || []).map((destination) => {
+    const contributed = confirmed.filter((item) => item.destinoId === destination.id)
+      .reduce((sum, item) => sum + toMoney(item.importe), 0);
+    const withdrawn = withdrawals.filter((item) => item.destinoId === destination.id)
+      .reduce((sum, item) => sum + toMoney(item.importe), 0);
+    const contributedCapital = toMoney(destination.capitalAportado) + contributed - withdrawn;
+    return {
+      id: destination.id,
+      nombre: destination.nombre,
+      tipoProducto: destination.tipoProducto,
+      saldoDeclarado: toMoney(destination.saldoDeclarado),
+      capitalAportado: contributedCapital,
+      saldoContabilizadoUnaVez: Math.max(0, toMoney(destination.saldoDeclarado) || contributedCapital),
+    };
+  });
+
+  return {
+    ahorroAcumulado: savingsAccumulated,
+    ahorroProgramadoMes: planProgrammed + unlinkedScheduleProgrammed,
+    ahorroTransferidoMes: monthlyTransfers.reduce((sum, item) => sum + toMoney(item.importe), 0),
+    ahorroPendienteTransferir: planPending + unlinkedSchedules,
+    capacidadAdicional: Math.max(0, financial.saldoProyectado - periodNetTransfer - planPending - unlinkedSchedules),
+    dineroReservadoMes: periodNetTransfer,
+    dineroLibreParaGastar: financial.saldoProyectado - periodNetTransfer,
+    metasActivas: goalBalances.filter((goal) => goal.estado === "Activa").length,
+    progresoMetas: goalBalances,
+    transferencias: confirmed,
+    retiros: withdrawals,
+    destinos: destinations,
   };
 }
 
@@ -366,6 +814,12 @@ export function createInitialState() {
     presupuestos: [],
     deudas: [],
     metasAhorro: [],
+    planesAhorro: [],
+    distribucionesAhorro: [],
+    destinosFinancieros: [],
+    aportesProgramados: [],
+    transferenciasAhorro: [],
+    retirosAhorro: [],
     categorias,
   };
 }
@@ -542,6 +996,82 @@ export function buildDashboardData(state, year, month, now = new Date()) {
   };
 }
 
+export function convertAnnualRateToEffective(ratePercent, rateType = "efectiva", compoundingPerYear = 12) {
+  const rate = toNumber(ratePercent) / 100;
+  const frequency = Math.max(1, Math.floor(toNumber(compoundingPerYear) || 12));
+  if (rateType === "nominal") {
+    const periodicRate = rate / frequency;
+    if (periodicRate <= -1) throw new Error("La tasa nominal y su capitalizacion producen una tasa periodica invalida.");
+    return (1 + periodicRate) ** frequency - 1;
+  }
+  if (rate <= -1) throw new Error("La tasa efectiva anual no puede ser igual o menor a -100 %.");
+  return rate;
+}
+
+export function simulateSavingsReturns(input = {}) {
+  const productType = SAVINGS_DESTINATION_TYPES.includes(input.tipoProducto) ? input.tipoProducto : "Cuenta remunerada";
+  const capitalization = Math.max(1, Math.floor(toNumber(input.capitalizacionPorAnio) || 12));
+  const periods = Math.max(1, Math.floor(toNumber(input.plazoMeses) || 1));
+  const startingCapital = toMoney(input.capitalInicial);
+  const requestedContribution = toMoney(input.aportePeriodico);
+  const contributionFrequency = {
+    mensual: 12,
+    quincenal: 24,
+    semanal: 52,
+    trimestral: 4,
+    anual: 1,
+  }[input.periodicidad] || 12;
+  const allowsAdditionalContributions = productType !== "CDT" || Boolean(input.permiteAportesDuranteVigencia);
+  const effectiveAnnualRate = convertAnnualRateToEffective(input.tasaAnual, input.tipoTasa, capitalization);
+  const monthlyRate = (1 + effectiveAnnualRate) ** (1 / 12) - 1;
+  const monthlyContribution = allowsAdditionalContributions ? requestedContribution * contributionFrequency / 12 : 0;
+  const monthlyCost = toMoney(input.costosMensuales);
+  const openingCost = toMoney(input.costoApertura);
+  const withholdingRate = Math.max(0, Math.min(100, toNumber(input.retencionPorcentaje))) / 100;
+  let balance = Math.max(0, startingCapital - openingCost);
+  let contributedCapital = startingCapital;
+  let grossReturn = 0;
+  let totalCosts = openingCost;
+  let totalWithholding = 0;
+  const schedule = [];
+
+  for (let month = 1; month <= periods; month += 1) {
+    const interest = balance * monthlyRate;
+    const withholding = Math.max(0, interest) * withholdingRate;
+    const periodCost = monthlyCost;
+    const contribution = monthlyContribution;
+    balance = Math.max(0, balance + interest - withholding - periodCost + contribution);
+    contributedCapital += contribution;
+    grossReturn += interest;
+    totalWithholding += withholding;
+    totalCosts += periodCost;
+    schedule.push({
+      mes: month,
+      capitalAportado: round2(contributedCapital),
+      rendimientoBruto: round2(grossReturn),
+      costos: round2(totalCosts),
+      retenciones: round2(totalWithholding),
+      valorEstimado: round2(balance),
+    });
+  }
+
+  return {
+    esProyeccion: true,
+    advertencia: "Proyeccion hipotetica; no representa una rentabilidad garantizada ni un saldo real.",
+    tipoProducto: productType,
+    tasaEfectivaAnualEquivalente: round2(effectiveAnnualRate * 100),
+    tasaEfectivaMensual: round2(monthlyRate * 100),
+    capitalAportado: round2(contributedCapital),
+    rendimientoBrutoEstimado: round2(grossReturn),
+    costosEstimados: round2(totalCosts),
+    retencionesEstimadas: round2(totalWithholding),
+    valorFuturoEstimado: round2(balance),
+    aportesAdicionalesHabilitados: allowsAdditionalContributions,
+    aportePeriodicoModelado: round2(monthlyContribution),
+    evolucionMensual: schedule,
+  };
+}
+
 export function calculateFinancialSummary(incomeRows = [], expenseRows = [], now = new Date()) {
   const totalIngresos = incomeRows.reduce((sum, item) => sum + financialAmounts(item).paid, 0);
   const gastosEfectivamentePagados = expenseRows.reduce((sum, item) => sum + financialAmounts(item).paid, 0);
@@ -577,7 +1107,19 @@ export function validateBackup(payload) {
   if (payload.app !== undefined && typeof payload.app !== "string") return { ok: false, message: "El nombre de la aplicacion en el respaldo no es valido." };
   if (!isPlainObject(data.settings)) return { ok: false, message: "Falta una configuracion valida en el respaldo." };
 
-  const listNames = ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"];
+  const listNames = [
+    "movimientos",
+    "presupuestos",
+    "categorias",
+    "deudas",
+    "metasAhorro",
+    "planesAhorro",
+    "distribucionesAhorro",
+    "destinosFinancieros",
+    "aportesProgramados",
+    "transferenciasAhorro",
+    "retirosAhorro",
+  ];
   for (const name of listNames) {
     if (data[name] !== undefined && !Array.isArray(data[name])) return { ok: false, message: `La seccion ${name} debe ser una lista.` };
     const rows = data[name] || [];
@@ -585,7 +1127,12 @@ export function validateBackup(payload) {
     for (const row of rows) {
       if (!isPlainObject(row)) return { ok: false, message: `La seccion ${name} contiene un registro invalido.` };
       if (row.id !== undefined && (typeof row.id !== "string" || !row.id.trim())) return { ok: false, message: `La seccion ${name} contiene un identificador invalido.` };
-      for (const field of ["fecha", "fechaLimite", "tipo", "categoria", "descripcion", "concepto", "estado", "nombre", "entidad", "responsable", "observacion", "mes"]) {
+      for (const field of [
+        "fecha", "fechaLimite", "fechaCreacion", "fechaObjetivo", "fechaApertura", "fechaVencimiento",
+        "fechaProgramada", "fechaEfectiva", "tipo", "tipoProducto", "tipoTasa", "categoria", "descripcion",
+        "concepto", "estado", "nombre", "entidad", "responsable", "observacion", "observaciones", "mes",
+        "modalidad", "basePorcentual", "escenario", "moneda", "liquidez", "referencia", "motivo",
+      ]) {
         if (row[field] !== undefined && row[field] !== null && typeof row[field] !== "string") {
           return { ok: false, message: `El campo ${field} tiene un tipo invalido en ${name}.` };
         }
@@ -595,11 +1142,21 @@ export function validateBackup(payload) {
       }
       if (row.id && ids.has(row.id)) return { ok: false, message: `El respaldo contiene identificadores duplicados en ${name}.` };
       if (row.id) ids.add(row.id);
-      for (const field of ["valorPresupuestado", "valorPagado", "valorFaltante", "faltante", "valorObjetivo", "valorAhorrado", "saldoInicial", "saldoActual", "cuotaMensual"]) {
+      for (const field of [
+        "valorPresupuestado", "valorPagado", "valorFaltante", "faltante", "valorObjetivo", "valorAhorrado",
+        "saldoInicial", "saldoActual", "cuotaMensual", "importeMensual", "porcentaje", "reservaSeguridad",
+        "presupuestoMensual", "capitalizacionPorAnio", "plazoMeses", "costosMensuales",
+        "costoApertura", "saldoDeclarado", "capitalAportado", "importePrevisto", "importeTransferido", "importe",
+        "aporteMensualPlanificado",
+      ]) {
         const value = row[field];
         if (value !== undefined && value !== null && value !== "" && (!Number.isFinite(Number(value)) || Number(value) < 0)) {
           return { ok: false, message: `El campo ${field} contiene un importe invalido en ${name}.` };
         }
+      }
+      if (row.tasaAnual !== undefined && row.tasaAnual !== null && row.tasaAnual !== ""
+        && (!Number.isFinite(Number(row.tasaAnual)) || Number(row.tasaAnual) < -100)) {
+        return { ok: false, message: `El campo tasaAnual contiene una tasa invalida en ${name}.` };
       }
     }
   }
@@ -671,6 +1228,20 @@ export function migrateData(input, sourceVersion = input?.schemaVersion ?? input
       data.schemaVersion = 2;
       data.version = 2;
     }
+    if (version === 2 && nextVersion === 3) {
+      for (const name of [
+        "planesAhorro",
+        "distribucionesAhorro",
+        "destinosFinancieros",
+        "aportesProgramados",
+        "transferenciasAhorro",
+        "retirosAhorro",
+      ]) {
+        if (!Array.isArray(data[name])) data[name] = [];
+      }
+      data.schemaVersion = 3;
+      data.version = 3;
+    }
     migrations.push({ from: version, to: nextVersion, migratedAt });
     version = nextVersion;
   }
@@ -705,6 +1276,20 @@ export function extractBackupData(payload) {
   else data.presupuestos = [...data.presupuestos];
   if (!Array.isArray(data.movimientos)) data.movimientos = [];
   else data.movimientos = [...data.movimientos];
+  for (const name of [
+    "categorias",
+    "deudas",
+    "metasAhorro",
+    "planesAhorro",
+    "distribucionesAhorro",
+    "destinosFinancieros",
+    "aportesProgramados",
+    "transferenciasAhorro",
+    "retirosAhorro",
+  ]) {
+    if (!Array.isArray(data[name])) data[name] = [];
+    else data[name] = [...data[name]];
+  }
   const movementIds = new Set(data.movimientos.map((item) => item.id).filter(Boolean));
   for (const expense of [...(data.gastos || [])]) {
     if (expense.id && movementIds.has(expense.id)) continue;
@@ -719,11 +1304,20 @@ export function extractBackupData(payload) {
     data.presupuestos.push({ ...income, tipo: "Ingreso" });
     if (income.id) budgetIds.add(income.id);
   }
-  if (!data.categorias) data.categorias = [];
-  if (!data.deudas) data.deudas = [];
-  if (!data.metasAhorro) data.metasAhorro = [];
   if (!data.settings) data.settings = {};
-  for (const name of ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"]) {
+  for (const name of [
+    "movimientos",
+    "presupuestos",
+    "categorias",
+    "deudas",
+    "metasAhorro",
+    "planesAhorro",
+    "distribucionesAhorro",
+    "destinosFinancieros",
+    "aportesProgramados",
+    "transferenciasAhorro",
+    "retirosAhorro",
+  ]) {
     data[name] = data[name].map((item, index) => item.id ? item : { ...item, id: legacyId(name, item, index) });
   }
   delete data.ingresos;
@@ -735,7 +1329,19 @@ export function mergeBackup(current, incoming) {
   const validation = validateBackup(incoming);
   if (!validation.ok) throw new Error(validation.message);
   const incomingData = extractBackupData(incoming);
-  const collections = ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"];
+  const collections = [
+    "movimientos",
+    "presupuestos",
+    "categorias",
+    "deudas",
+    "metasAhorro",
+    "planesAhorro",
+    "distribucionesAhorro",
+    "destinosFinancieros",
+    "aportesProgramados",
+    "transferenciasAhorro",
+    "retirosAhorro",
+  ];
   const added = {};
   const duplicates = [];
   const conflicts = [];
@@ -783,6 +1389,12 @@ export function backupCounts(payload) {
     categorias: (data.categorias || []).length,
     deudas: (data.deudas || []).length,
     metasAhorro: (data.metasAhorro || []).length,
+    planesAhorro: (data.planesAhorro || []).length,
+    distribucionesAhorro: (data.distribucionesAhorro || []).length,
+    destinosFinancieros: (data.destinosFinancieros || []).length,
+    aportesProgramados: (data.aportesProgramados || []).length,
+    transferenciasAhorro: (data.transferenciasAhorro || []).length,
+    retirosAhorro: (data.retirosAhorro || []).length,
   };
 }
 

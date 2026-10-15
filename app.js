@@ -3,6 +3,7 @@ import {
   PAYMENT_METHODS,
   STORAGE_KEY,
   DATA_SCHEMA_VERSION,
+  annulSavingsTransfer,
   archiveStorageValue,
   addCategoryIfMissing,
   backupCounts,
@@ -11,18 +12,33 @@ import {
   createInitialState,
   calculateFinancialSummary,
   calculateMonthlySummary,
+  calculateSavingsDistribution,
+  calculateSavingsPlanAmount,
+  calculateSavingsSummary,
   buildMovementCopyPlan,
+  correctSavingsTransfer,
   extractBackupData,
   formatCOP,
   getMovementStatus,
   getMonthlyMovements,
   mergeBackup,
   normalizeBudgetItem,
+  normalizeFinancialDestination,
+  normalizeSavingsDistribution,
+  normalizeSavingsGoal,
+  normalizeSavingsPlan,
   normalizeMovement,
+  normalizeScheduledSavings,
+  normalizeSavingsTransfer,
+  normalizeSavingsWithdrawal,
   removeRecord,
+  registerSavingsTransfer,
+  registerSavingsWithdrawal,
   restoreStateFromBackup,
   shiftDateToPeriod,
   storageErrorMessage,
+  savingsCommitmentStatus,
+  simulateSavingsReturns,
   upsertRecord,
   validateBackup,
 } from "./finance-core.js";
@@ -31,6 +47,7 @@ const views = [
   ["dashboard", "Inicio"],
   ["presupuesto", "Presupuesto"],
   ["movimientos", "Movimientos"],
+  ["futuro", "Mi Futuro"],
 ];
 
 const START_YEAR = new Date().getFullYear();
@@ -49,6 +66,8 @@ const state = {
   edit: null,
   movementModal: false,
   copyModal: null,
+  savingsSimulation: null,
+  savingsError: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -92,7 +111,7 @@ function loadState() {
   const sourceData = parsed.data && typeof parsed.data === "object" ? parsed.data : parsed;
   const needsMigration = validation.schemaVersion < DATA_SCHEMA_VERSION
     || !sourceData.settings?.appMode
-    || ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro"].some((name) => {
+    || ["movimientos", "presupuestos", "categorias", "deudas", "metasAhorro", "planesAhorro", "distribucionesAhorro", "destinosFinancieros", "aportesProgramados", "transferenciasAhorro", "retirosAhorro"].some((name) => {
       const rows = sourceData[name] || [];
       return rows.some((row) => !row.id)
         || (["movimientos", "presupuestos"].includes(name) && rows.some((row) => !row.versionModeloFinanciero));
@@ -148,7 +167,13 @@ function ensureSimpleState(data) {
     presupuestos,
     categorias: data.categorias || current.categorias,
     deudas: data.deudas || [],
-    metasAhorro: data.metasAhorro || [],
+    metasAhorro: (data.metasAhorro || []).map(normalizeSavingsGoal),
+    planesAhorro: (data.planesAhorro || []).map(normalizeSavingsPlan),
+    distribucionesAhorro: (data.distribucionesAhorro || []).map(normalizeSavingsDistribution),
+    destinosFinancieros: (data.destinosFinancieros || []).map(normalizeFinancialDestination),
+    aportesProgramados: (data.aportesProgramados || []).map(normalizeScheduledSavings),
+    transferenciasAhorro: (data.transferenciasAhorro || []).map(normalizeSavingsTransfer),
+    retirosAhorro: (data.retirosAhorro || []).map(normalizeSavingsWithdrawal),
   };
   return next;
 }
@@ -208,6 +233,10 @@ function htmlEscape(value) {
 
 function options(items, selected) {
   return items.map((item) => `<option value="${htmlEscape(item)}" ${item === selected ? "selected" : ""}>${htmlEscape(item)}</option>`).join("");
+}
+
+function recordOptions(rows, selected = "") {
+  return rows.map((item) => `<option value="${htmlEscape(item.id)}" ${item.id === selected ? "selected" : ""}>${htmlEscape(item.nombre)}</option>`).join("");
 }
 
 function monthLabel(month) {
@@ -301,6 +330,8 @@ function backupPanel() {
         <li>${preview.counts.ingresos} ingresos · ${preview.counts.gastos} gastos</li>
         <li>${preview.counts.presupuestos} presupuestos · ${preview.counts.categorias} categorias</li>
         <li>${preview.counts.deudas} deudas · ${preview.counts.metasAhorro} metas de ahorro</li>
+        <li>${preview.counts.planesAhorro} planes · ${preview.counts.distribucionesAhorro} distribuciones · ${preview.counts.destinosFinancieros} destinos</li>
+        <li>${preview.counts.aportesProgramados} aportes programados · ${preview.counts.transferenciasAhorro} transferencias · ${preview.counts.retirosAhorro} retiros</li>
       </ul>
       ${preview.merge ? `
         <p>Al combinar se agregaran ${Object.values(preview.merge.added).reduce((sum, count) => sum + count, 0)} registros nuevos; ${preview.merge.duplicates.length} ya existen iguales.</p>
@@ -660,6 +691,188 @@ function renderPresupuesto() {
   `;
 }
 
+function renderFutureFinance() {
+  const year = activeYear();
+  const month = activeMonth();
+  const savings = calculateSavingsSummary(state.data, year, month);
+  const activeGoals = state.data.metasAhorro.filter((goal) => goal.estado === "Activa");
+  const distribution = state.data.distribucionesAhorro.find((item) => item.anio === year && item.mes === month);
+  const distributionResult = distribution
+    ? calculateSavingsDistribution(distribution, state.data.metasAhorro)
+    : null;
+  const plans = state.data.planesAhorro.filter((plan) => plan.estado !== "Pausado");
+  const commitments = state.data.aportesProgramados
+    .filter((item) => String(item.fechaProgramada || "").startsWith(`${year}-${String(MONTHS.indexOf(month) + 1).padStart(2, "0")}`))
+    .sort((a, b) => a.fechaProgramada.localeCompare(b.fechaProgramada));
+  const transferables = state.data.aportesProgramados.filter((item) =>
+    item.estado !== "Cancelado"
+    && savingsCommitmentStatus(item, state.data.transferenciasAhorro) !== "Transferido",
+  );
+  const simulation = state.savingsSimulation;
+  const destinations = state.data.destinosFinancieros;
+  const goalsMarkup = savings.progresoMetas.length ? savings.progresoMetas.map((goal) => `
+    <article class="future-goal">
+      <div class="future-goal-heading"><div><strong>${htmlEscape(goal.nombre)}</strong><span>${htmlEscape(goal.estado)}</span></div><b>${formatCOP(goal.acumulado)} / ${formatCOP(goal.objetivo)}</b></div>
+      <progress max="100" value="${Math.min(100, goal.porcentaje)}" aria-label="Avance de ${htmlEscape(goal.nombre)}: ${goal.porcentaje}%">${goal.porcentaje}%</progress>
+      <small>${goal.porcentaje}% de avance${goal.destinosFinancieros.length ? ` · ${goal.destinosFinancieros.map((idValue) => htmlEscape(destinations.find((item) => item.id === idValue)?.nombre || "Destino sin nombre")).join(", ")}` : ""}</small>
+      <div class="future-actions">
+        <button type="button" class="secondary" data-edit-goal="${htmlEscape(goal.id)}">Editar meta</button>
+        ${goal.estado !== "Completada" ? `<button type="button" class="secondary" data-goal-state="${htmlEscape(goal.id)}" data-state="Completada">Completar</button>` : ""}
+        ${goal.estado === "Activa" ? `<button type="button" class="secondary" data-goal-state="${htmlEscape(goal.id)}" data-state="Pausada">Pausar</button>` : ""}
+        ${goal.estado === "Pausada" ? `<button type="button" class="secondary" data-goal-state="${htmlEscape(goal.id)}" data-state="Activa">Reanudar</button>` : ""}
+        ${goal.estado !== "Cancelada" ? `<button type="button" class="secondary" data-goal-state="${htmlEscape(goal.id)}" data-state="Cancelada">Cancelar meta</button>` : ""}
+      </div>
+    </article>`).join("") : `<div class="empty"><strong>Aún no hay metas de ahorro.</strong><span>Crea una meta para seguir un objetivo concreto.</span></div>`;
+  const destinationRows = destinations.length ? `
+    <div class="table-wrap"><table><thead><tr><th>Destino</th><th>Producto</th><th>Entidad</th><th>Capital registrado</th><th>Saldo de referencia</th><th>Liquidez</th><th>Acciones</th></tr></thead>
+    <tbody>${savings.destinos.map((item) => `<tr><td data-label="Destino">${htmlEscape(item.nombre)}</td><td data-label="Producto">${htmlEscape(item.tipoProducto)}</td><td data-label="Entidad">${htmlEscape(destinations.find((destination) => destination.id === item.id)?.entidad || "—")}</td><td data-label="Capital registrado">${formatCOP(item.capitalAportado)}</td><td data-label="Saldo de referencia">${formatCOP(item.saldoContabilizadoUnaVez)}</td><td data-label="Liquidez">${htmlEscape(destinations.find((destination) => destination.id === item.id)?.liquidez || "No especificada")}</td><td data-label="Acciones"><button type="button" class="secondary" data-edit-destination="${htmlEscape(item.id)}">Editar</button></td></tr>`).join("")}</tbody></table></div>
+  ` : `<div class="empty"><strong>No hay destinos registrados.</strong><span>Agrega una cuenta, fondo o producto para organizar tus aportes.</span></div>`;
+  const transferRows = savings.transferencias.length ? `
+    <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Destino</th><th>Meta</th><th>Importe</th><th>Referencia</th><th>Acciones</th></tr></thead><tbody>
+      ${savings.transferencias.slice().sort((a, b) => b.fechaEfectiva.localeCompare(a.fechaEfectiva)).map((item) => `<tr><td data-label="Fecha">${htmlEscape(item.fechaEfectiva)}</td><td data-label="Destino">${htmlEscape(destinations.find((row) => row.id === item.destinoId)?.nombre || "—")}</td><td data-label="Meta">${htmlEscape(state.data.metasAhorro.find((row) => row.id === item.metaId)?.nombre || "—")}</td><td data-label="Importe">${formatCOP(item.importe)}</td><td data-label="Referencia">${htmlEscape(item.referencia || "—")}</td><td data-label="Acciones" class="row-actions"><button type="button" class="secondary" data-correct-transfer="${htmlEscape(item.id)}">Corregir</button><button type="button" class="danger" data-annul-transfer="${htmlEscape(item.id)}">Anular</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty"><strong>Sin transferencias confirmadas.</strong><span>Los aportes solo se contabilizan cuando registras la transferencia.</span></div>`;
+  const withdrawalRows = savings.retiros.length ? `<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Meta</th><th>Destino</th><th>Importe</th><th>Motivo</th></tr></thead><tbody>${savings.retiros.map((item) => `<tr><td data-label="Fecha">${htmlEscape(item.fechaEfectiva)}</td><td data-label="Meta">${htmlEscape(state.data.metasAhorro.find((goal) => goal.id === item.metaId)?.nombre || "—")}</td><td data-label="Destino">${htmlEscape(destinations.find((destination) => destination.id === item.destinoId)?.nombre || "—")}</td><td data-label="Importe">${formatCOP(item.importe)}</td><td data-label="Motivo">${htmlEscape(item.motivo || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<p class="muted">No hay retiros registrados.</p>`;
+  return `
+    <section class="panel future-intro">
+      <div class="panel-header"><div><h2>Mi Futuro Financiero</h2><p>Organiza metas y ahorros sin modificar los indicadores de tus gastos y saldos actuales.</p></div></div>
+      <div class="future-balance-row">
+        <article><span>Programado este mes</span><strong>${formatCOP(savings.ahorroProgramadoMes)}</strong></article>
+        <article><span>Transferido este mes</span><strong>${formatCOP(savings.ahorroTransferidoMes)}</strong></article>
+        <article><span>Pendiente de transferir</span><strong>${formatCOP(savings.ahorroPendienteTransferir)}</strong></article>
+        <article><span>Dinero libre para gastar*</span><strong>${formatCOP(savings.dineroLibreParaGastar)}</strong></article>
+      </div>
+      <small>*Saldo proyectado menos transferencias de ahorro confirmadas del periodo. No altera el saldo disponible ni el proyectado de Inicio.</small>
+      ${state.savingsError ? `<div class="alert danger" role="alert">${htmlEscape(state.savingsError)}</div>` : ""}
+    </section>
+
+    <div class="future-grid">
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Planes de ahorro</h2><p>Define aportes fijos, un porcentaje de ingresos o una capacidad inteligente.</p></div></div>
+        <form id="savingsPlanForm" class="grid-form">
+          <label>Nombre<input name="nombre" required placeholder="Ej. Ahorro mensual" /></label>
+          <label>Modalidad<select name="modalidad"><option value="fijo">Importe fijo</option><option value="porcentual">Porcentaje de ingresos</option><option value="inteligente">Ahorro inteligente</option></select></label>
+          <label>Importe mensual<input type="number" min="0" step="1" name="importeMensual" value="0" /></label>
+          <label>Porcentaje<input type="number" min="0" max="100" step="0.01" name="porcentaje" value="0" /></label>
+          <label>Base del porcentaje<select name="basePorcentual"><option value="recibido">Ingresos recibidos</option><option value="presupuestado">Ingresos presupuestados</option></select></label>
+          <label>Reserva de seguridad<input type="number" min="0" step="1" name="reservaSeguridad" value="0" /></label>
+          <label>Escenario inteligente<select name="escenario"><option value="conservador">Conservador</option><option value="equilibrado" selected>Equilibrado</option><option value="ambicioso">Ambicioso</option></select></label>
+          <div class="actions span-4"><button type="submit">Crear plan</button></div>
+        </form>
+        ${plans.length ? `<ul class="future-list">${plans.map((plan) => {
+          const result = calculateSavingsPlanAmount(state.data, year, month, plan);
+          return `<li><div><strong>${htmlEscape(plan.nombre)}</strong><span>${htmlEscape(plan.modalidad)} · ${formatCOP(result.amount)} estimados · capacidad ${formatCOP(result.capacity)}</span></div><span class="status ${result.affordable ? "Pagado" : "Pendiente"}">${result.affordable ? "Dentro de la capacidad" : "Supera la capacidad"}</span><button type="button" class="secondary" data-pause-plan="${htmlEscape(plan.id)}">Pausar</button></li>`;
+        }).join("")}</ul>` : `<div class="empty">No hay planes activos.</div>`}
+        ${state.data.planesAhorro.some((plan) => plan.estado === "Pausado") ? `<div class="future-actions">${state.data.planesAhorro.filter((plan) => plan.estado === "Pausado").map((plan) => `<button type="button" class="secondary" data-resume-plan="${htmlEscape(plan.id)}">Reanudar ${htmlEscape(plan.nombre)}</button>`).join("")}</div>` : ""}
+      </section>
+
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Metas de ahorro</h2><p>Sigue el avance con aportes confirmados y conserva el saldo inicial que registres.</p></div></div>
+        <form id="savingsGoalForm" class="grid-form">
+          <label>Nombre de la meta<input name="nombre" required placeholder="Ej. Fondo de emergencia" /></label>
+          <label>Valor objetivo<input type="number" min="1" step="1" name="valorObjetivo" required /></label>
+          <label>Saldo inicial reconocido<input type="number" min="0" step="1" name="saldoInicialReconocido" value="0" /></label>
+          <label>Fecha objetivo<input type="date" name="fechaObjetivo" /></label>
+          <label>Aporte mensual planeado<input type="number" min="0" step="1" name="aporteMensualPlanificado" value="0" /></label>
+          <label class="span-2">Descripción<input name="descripcion" placeholder="¿Para qué estás ahorrando?" /></label>
+          <div class="actions span-4"><button type="submit">Crear meta</button></div>
+        </form>
+        <div class="future-goals">${goalsMarkup}</div>
+      </section>
+
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Distribución mensual</h2><p>Asigna un presupuesto de ahorro entre metas activas. La suma no puede superar 100 %.</p></div></div>
+        <form id="savingsDistributionForm" class="grid-form">
+          <label>Presupuesto de ahorro del mes<input name="presupuestoMensual" type="number" min="0" step="1" required value="${distribution?.presupuestoMensual ?? savings.ahorroProgramadoMes}" /></label>
+          ${activeGoals.map((goal) => `<label>${htmlEscape(goal.nombre)} (%)<input name="allocation_${htmlEscape(goal.id)}" type="number" min="0" max="100" step="0.01" value="${distribution?.asignaciones.find((item) => item.metaId === goal.id)?.porcentaje ?? 0}" /></label>`).join("")}
+          <div class="actions span-4"><button type="submit">Guardar distribución</button></div>
+        </form>
+        ${distributionResult ? `<div class="allocation-summary"><strong>${distributionResult.porcentajeDistribuido}% asignado · ${formatCOP(distributionResult.importeDistribuido)}</strong><span>${distributionResult.porcentajeSinDistribuir}% sin asignar · ${formatCOP(distributionResult.importeSinDistribuir)}</span>${distributionResult.allocations.map((item) => `<small>${htmlEscape(item.nombre)}: ${formatCOP(item.importe)}</small>`).join("")}</div>` : `<p class="muted">Aún no hay distribución para este periodo.</p>`}
+      </section>
+
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Destinos financieros</h2><p>Registra cuentas, fondos, CDT y otras alternativas. Las tasas solo alimentan simulaciones.</p></div></div>
+        <form id="savingsDestinationForm" class="grid-form">
+          <label>Nombre<input name="nombre" required placeholder="Ej. Cuenta de ahorro" /></label>
+          <label>Entidad<input name="entidad" placeholder="Banco o entidad" /></label>
+          <label>Tipo de producto<select name="tipoProducto">${options(["Cuenta de ahorros", "Cuenta remunerada", "Fondo de inversión colectiva", "CDT", "Otro"], "Cuenta de ahorros")}</select></label>
+          <label>Saldo de referencia<input name="saldoDeclarado" type="number" min="0" step="1" value="0" /></label>
+          <label>Capital aportado conocido<input name="capitalAportado" type="number" min="0" step="1" value="0" /></label>
+          <label>Tasa anual (%)<input name="tasaAnual" type="number" min="-100" step="0.01" value="0" /></label>
+          <label>Tipo de tasa<select name="tipoTasa"><option value="efectiva">Efectiva anual</option><option value="nominal">Nominal anual</option></select></label>
+          <label>Liquidez<input name="liquidez" placeholder="Ej. inmediata, 90 días" /></label>
+          <div class="actions span-4"><button type="submit">Agregar destino</button></div>
+        </form>
+        ${destinationRows}
+      </section>
+
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Calendario de aportes</h2><p>Compromisos del periodo ${monthLabel(month)} ${year}, con estados por fecha y pagos parciales.</p></div></div>
+        <form id="scheduledSavingsForm" class="grid-form">
+          <label>Fecha programada<input name="fechaProgramada" type="date" required value="${year}-${String(MONTHS.indexOf(month) + 1).padStart(2, "0")}-15" /></label>
+          <label>Importe previsto<input name="importePrevisto" type="number" min="1" step="1" required /></label>
+          <label>Meta<select name="metaId"><option value="">Sin meta</option>${recordOptions(activeGoals)}</select></label>
+          <label>Destino<select name="destinoId"><option value="">Sin destino</option>${recordOptions(destinations)}</select></label>
+          <label>Plan<select name="planId"><option value="">Sin plan</option>${recordOptions(plans)}</select></label>
+          <label class="span-2">Observaciones<input name="observaciones" /></label>
+          <div class="actions span-4"><button type="submit">Programar aporte</button></div>
+        </form>
+        ${commitments.length ? `<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Importe previsto</th><th>Transferido</th><th>Pendiente</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${commitments.map((item) => {
+          const transferred = state.data.transferenciasAhorro.filter((transfer) => transfer.aporteProgramadoId === item.id && transfer.estado !== "Cancelada").reduce((sum, transfer) => sum + Number(transfer.importe || 0), 0);
+          return `<tr><td data-label="Fecha">${htmlEscape(item.fechaProgramada)}</td><td data-label="Importe previsto">${formatCOP(item.importePrevisto)}</td><td data-label="Transferido">${formatCOP(transferred)}</td><td data-label="Pendiente">${formatCOP(Math.max(0, item.importePrevisto - transferred))}</td><td data-label="Estado"><span class="status ${savingsCommitmentStatus(item, state.data.transferenciasAhorro)}">${savingsCommitmentStatus(item, state.data.transferenciasAhorro)}</span></td><td data-label="Acción"><button type="button" class="secondary" data-cancel-scheduled="${htmlEscape(item.id)}">Cancelar</button></td></tr>`;
+        }).join("")}</tbody></table></div>` : `<div class="empty">No hay aportes programados para este mes.</div>`}
+        <form id="savingsTransferForm" class="grid-form future-transfer-form">
+          <h3 class="span-4">Registrar transferencia confirmada</h3>
+          <label>Aporte programado<select name="aporteProgramadoId" required>${transferables.map((item) => `<option value="${htmlEscape(item.id)}">${htmlEscape(item.fechaProgramada)} · ${formatCOP(Math.max(0, item.importePrevisto - state.data.transferenciasAhorro.filter((transfer) => transfer.aporteProgramadoId === item.id && transfer.estado !== "Cancelada").reduce((sum, transfer) => sum + Number(transfer.importe || 0), 0)))} pendiente</option>`).join("")}</select></label>
+          <label>Importe transferido<input name="importe" type="number" min="1" step="1" required /></label>
+          <label>Fecha efectiva<input name="fechaEfectiva" type="date" required value="${new Date().toISOString().slice(0, 10)}" /></label>
+          <label>Referencia<input name="referencia" /></label>
+          <div class="actions span-4"><button type="submit" ${transferables.length ? "" : "disabled"}>Confirmar transferencia</button></div>
+        </form>
+      </section>
+
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Retiros de ahorro</h2><p>Los retiros confirmados reducen el ahorro acumulado sin reescribir transferencias anteriores.</p></div></div>
+        <form id="savingsWithdrawalForm" class="grid-form">
+          <label>Meta<select name="metaId" required>${recordOptions(activeGoals, activeGoals[0]?.id || "")}</select></label>
+          <label>Destino<select name="destinoId"><option value="">Sin destino</option>${recordOptions(destinations)}</select></label>
+          <label>Importe retirado<input name="importe" type="number" min="1" step="1" required /></label>
+          <label>Fecha efectiva<input name="fechaEfectiva" type="date" required value="${new Date().toISOString().slice(0, 10)}" /></label>
+          <label class="span-2">Motivo<input name="motivo" /></label>
+          <div class="actions span-4"><button type="submit" ${activeGoals.length ? "" : "disabled"}>Registrar retiro</button></div>
+        </form>
+      </section>
+
+      <section class="panel future-card">
+        <div class="panel-header"><div><h2>Simulador de rendimientos</h2><p>Proyección hipotética; no representa rentabilidad garantizada ni saldo real.</p></div></div>
+        <form id="savingsSimulationForm" class="grid-form">
+          <label>Producto<select name="tipoProducto">${options(["Cuenta de ahorros", "Cuenta remunerada", "Fondo de inversión colectiva", "CDT", "Otro"], "Cuenta remunerada")}</select></label>
+          <label>Capital inicial<input name="capitalInicial" type="number" min="0" value="0" /></label>
+          <label>Aporte periódico<input name="aportePeriodico" type="number" min="0" value="0" /></label>
+          <label>Periodicidad<select name="periodicidad"><option value="mensual">Mensual</option><option value="quincenal">Quincenal</option><option value="semanal">Semanal</option><option value="trimestral">Trimestral</option><option value="anual">Anual</option></select></label>
+          <label>Tasa anual (%)<input name="tasaAnual" type="number" min="-100" step="0.01" value="0" /></label>
+          <label>Tipo de tasa<select name="tipoTasa"><option value="efectiva">Efectiva anual</option><option value="nominal">Nominal anual</option></select></label>
+          <label>Capitalizaciones por año<input name="capitalizacionPorAnio" type="number" min="1" value="12" /></label>
+          <label>Plazo (meses)<input name="plazoMeses" type="number" min="1" value="12" /></label>
+          <label>Costos mensuales<input name="costosMensuales" type="number" min="0" value="0" /></label>
+          <label>Costo inicial<input name="costoApertura" type="number" min="0" value="0" /></label>
+          <label>Retención sobre intereses (%)<input name="retencionPorcentaje" type="number" min="0" max="100" value="0" /></label>
+          <label class="future-check"><input name="permiteAportesDuranteVigencia" type="checkbox" /> Permite aportes durante la vigencia</label>
+          <div class="actions span-4"><button type="submit">Simular</button></div>
+        </form>
+        ${simulation ? `<div class="simulation-result" role="status"><strong>Valor futuro estimado: ${formatCOP(simulation.valorFuturoEstimado)}</strong><span>Capital aportado ${formatCOP(simulation.capitalAportado)} · Rendimiento bruto ${formatCOP(simulation.rendimientoBrutoEstimado)}</span><span>Costos ${formatCOP(simulation.costosEstimados)} · Retenciones ${formatCOP(simulation.retencionesEstimadas)}</span><small>${htmlEscape(simulation.advertencia)}${simulation.aportesAdicionalesHabilitados ? "" : " El CDT no admite aportes adicionales durante el plazo."}</small></div>` : ""}
+      </section>
+
+      <section class="panel future-card future-span">
+        <div class="panel-header"><div><h2>Progreso e historial</h2><p>Los movimientos se registran como transferencias internas; no son gastos de consumo.</p></div></div>
+        <h3>Transferencias confirmadas</h3>
+        ${transferRows}
+        <h3>Retiros registrados</h3>
+        ${withdrawalRows}
+      </section>
+    </div>
+  `;
+}
+
 function simpleTable(rows, columns, config = {}) {
   if (!rows.length) return $("#emptyState").innerHTML;
   const labels = {
@@ -697,6 +910,9 @@ function actionCell(row, config) {
 function upsert(listName, item) {
   const updated = upsertRecord(state.data[listName], item);
   if (!saveState({ ...state.data, [listName]: updated })) return;
+  if (["planesAhorro", "metasAhorro", "distribucionesAhorro", "destinosFinancieros", "aportesProgramados"].includes(listName)) {
+    state.savingsError = "";
+  }
   state.edit = null;
   if (listName === "movimientos") state.movementModal = false;
   render();
@@ -920,6 +1136,172 @@ function bindEvents() {
     upsert("presupuestos", normalizeBudgetItem(payload));
   });
 
+  $("#savingsPlanForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const payload = serializeForm(event.currentTarget);
+    const plan = normalizeSavingsPlan(payload);
+    if (!plan.nombre.trim()) return alert("Escribe un nombre para el plan.");
+    upsert("planesAhorro", plan);
+  });
+
+  $("#savingsGoalForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const payload = serializeForm(event.currentTarget);
+    const goal = normalizeSavingsGoal(payload);
+    if (!goal.nombre.trim() || goal.valorObjetivo <= 0) return alert("La meta requiere un nombre y un valor objetivo mayor que cero.");
+    upsert("metasAhorro", goal);
+  });
+
+  $("#savingsDistributionForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const payload = serializeForm(event.currentTarget);
+      const assignments = Object.entries(payload)
+        .filter(([key, value]) => key.startsWith("allocation_") && Number(value) > 0)
+        .map(([key, value]) => ({ metaId: key.slice("allocation_".length), porcentaje: Number(value) }));
+      const current = state.data.distribucionesAhorro.find((item) => item.anio === activeYear() && item.mes === activeMonth());
+      const item = normalizeSavingsDistribution({
+        ...current,
+        anio: activeYear(),
+        mes: activeMonth(),
+        presupuestoMensual: payload.presupuestoMensual,
+        asignaciones: assignments,
+      });
+      calculateSavingsDistribution(item, state.data.metasAhorro);
+      upsert("distribucionesAhorro", item);
+    } catch (error) {
+      state.savingsError = error.message;
+      render();
+    }
+  });
+
+  $("#savingsDestinationForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const destination = normalizeFinancialDestination(serializeForm(event.currentTarget));
+    if (!destination.nombre.trim()) return alert("Escribe un nombre para el destino financiero.");
+    upsert("destinosFinancieros", destination);
+  });
+
+  $("#scheduledSavingsForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const item = normalizeScheduledSavings(serializeForm(event.currentTarget));
+    if (!item.fechaProgramada || item.importePrevisto <= 0) return alert("Indica una fecha y un importe previsto mayor que cero.");
+    upsert("aportesProgramados", item);
+  });
+
+  $("#savingsTransferForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const payload = serializeForm(event.currentTarget);
+      const next = registerSavingsTransfer(state.data, payload);
+      if (!saveState(next)) return;
+      state.savingsError = "";
+      render();
+    } catch (error) {
+      state.savingsError = error.message;
+      render();
+    }
+  });
+
+  $("#savingsWithdrawalForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const next = registerSavingsWithdrawal(state.data, serializeForm(event.currentTarget));
+      if (!saveState(next)) return;
+      state.savingsError = "";
+      render();
+    } catch (error) {
+      state.savingsError = error.message;
+      render();
+    }
+  });
+
+  $("#savingsSimulationForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const payload = serializeForm(event.currentTarget);
+      payload.permiteAportesDuranteVigencia = event.currentTarget.elements.permiteAportesDuranteVigencia.checked;
+      state.savingsSimulation = simulateSavingsReturns(payload);
+      state.savingsError = "";
+    } catch (error) {
+      state.savingsError = error.message;
+    }
+    render();
+  });
+
+  document.querySelectorAll("[data-goal-state]").forEach((button) => button.addEventListener("click", () => {
+    const goal = state.data.metasAhorro.find((item) => item.id === button.dataset.goalState);
+    if (!goal) return;
+    const updated = normalizeSavingsGoal({ ...goal, estado: button.dataset.state });
+    upsert("metasAhorro", updated);
+  }));
+  document.querySelectorAll("[data-edit-goal]").forEach((button) => button.addEventListener("click", () => {
+    const goal = state.data.metasAhorro.find((item) => item.id === button.dataset.editGoal);
+    if (!goal) return;
+    const nombre = prompt("Nombre de la meta:", goal.nombre);
+    if (nombre === null) return;
+    const valorObjetivo = prompt("Valor objetivo (COP):", String(goal.valorObjetivo));
+    if (valorObjetivo === null) return;
+    const fechaObjetivo = prompt("Fecha objetivo (AAAA-MM-DD, opcional):", goal.fechaObjetivo || "");
+    if (fechaObjetivo === null) return;
+    if (!nombre.trim() || !Number.isFinite(Number(valorObjetivo)) || Number(valorObjetivo) <= 0) {
+      state.savingsError = "La meta requiere un nombre y un valor objetivo mayor que cero.";
+      render();
+      return;
+    }
+    upsert("metasAhorro", normalizeSavingsGoal({ ...goal, nombre, valorObjetivo, fechaObjetivo }));
+  }));
+  document.querySelectorAll("[data-edit-destination]").forEach((button) => button.addEventListener("click", () => {
+    const destination = state.data.destinosFinancieros.find((item) => item.id === button.dataset.editDestination);
+    if (!destination) return;
+    const nombre = prompt("Nombre del destino:", destination.nombre);
+    if (nombre === null) return;
+    const tasaAnual = prompt("Tasa anual porcentual (solo para simulaciones):", String(destination.tasaAnual));
+    if (tasaAnual === null) return;
+    if (!nombre.trim() || !Number.isFinite(Number(tasaAnual)) || Number(tasaAnual) < -100) {
+      state.savingsError = "Revisa el nombre y la tasa anual del destino.";
+      render();
+      return;
+    }
+    upsert("destinosFinancieros", normalizeFinancialDestination({ ...destination, nombre, tasaAnual }));
+  }));
+  document.querySelectorAll("[data-pause-plan], [data-resume-plan]").forEach((button) => button.addEventListener("click", () => {
+    const idValue = button.dataset.pausePlan || button.dataset.resumePlan;
+    const plan = state.data.planesAhorro.find((item) => item.id === idValue);
+    if (!plan) return;
+    upsert("planesAhorro", normalizeSavingsPlan({ ...plan, estado: plan.estado === "Pausado" ? "Activo" : "Pausado" }));
+  }));
+  document.querySelectorAll("[data-cancel-scheduled]").forEach((button) => button.addEventListener("click", () => {
+    const item = state.data.aportesProgramados.find((row) => row.id === button.dataset.cancelScheduled);
+    if (!item || !confirm("¿Cancelar este aporte programado? Las transferencias ya confirmadas se conservarán en el historial.")) return;
+    upsert("aportesProgramados", normalizeScheduledSavings({ ...item, estado: "Cancelado" }));
+  }));
+  document.querySelectorAll("[data-annul-transfer]").forEach((button) => button.addEventListener("click", () => {
+    if (!confirm("¿Anular esta transferencia? Se conservará en el historial como anulada y dejará de contar como ahorro confirmado.")) return;
+    try {
+      const next = annulSavingsTransfer(state.data, button.dataset.annulTransfer);
+      if (saveState(next)) render();
+    } catch (error) {
+      state.savingsError = error.message;
+      render();
+    }
+  }));
+  document.querySelectorAll("[data-correct-transfer]").forEach((button) => button.addEventListener("click", () => {
+    const transfer = state.data.transferenciasAhorro.find((item) => item.id === button.dataset.correctTransfer);
+    if (!transfer) return;
+    const amount = prompt("Importe correcto de la transferencia (COP):", String(transfer.importe));
+    if (amount === null) return;
+    const date = prompt("Fecha efectiva correcta (AAAA-MM-DD):", transfer.fechaEfectiva);
+    if (date === null) return;
+    try {
+      const next = correctSavingsTransfer(state.data, transfer.id, { importe: amount, fechaEfectiva: date });
+      if (saveState(next)) render();
+    } catch (error) {
+      state.savingsError = error.message;
+      render();
+    }
+  }));
+
   document.querySelectorAll("[data-cancel]").forEach((button) => button.addEventListener("click", () => { state.edit = null; state.movementModal = false; render(); }));
   document.querySelector("[data-open-movement-modal]")?.addEventListener("click", () => { state.edit = null; state.movementModal = true; render(); });
   document.querySelectorAll("[data-close-movement-modal]").forEach((button) => button.addEventListener("click", () => { state.edit = null; state.movementModal = false; render(); }));
@@ -958,6 +1340,7 @@ function render() {
     dashboard: renderDashboard,
     movimientos: renderMovimientos,
     presupuesto: renderPresupuesto,
+    futuro: renderFutureFinance,
   };
   viewEl.innerHTML = `${state.persistenceMessage ? `<div class="alert danger" role="alert">${htmlEscape(state.persistenceMessage)}</div>` : ""}${(renderers[state.view] || renderDashboard)()}`;
   bindEvents();

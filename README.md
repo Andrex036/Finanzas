@@ -22,6 +22,9 @@ La app no necesita backend ni base de datos. El servidor local solo entrega los 
 
 - Inicio: resumen mensual del saldo disponible actual y el saldo proyectado despues de las obligaciones.
 - Inicio incluye indicadores de ingresos, pagos, obligaciones pendientes y vencidas, compromiso de recursos, distribucion por categoria, estado de obligaciones y evolucion de seis meses. Las barras incluyen sus importes textuales y el diseño se adapta a pantallas moviles.
+- Mi Futuro: planes de ahorro, metas con progreso, distribución mensual, destinos financieros, calendario de aportes, registro auditable de transferencias y retiros, e historial.
+- El dinero libre para gastar de Mi Futuro resta las transferencias de ahorro confirmadas del saldo proyectado del mes. Estas transferencias internas no se convierten en gastos ni modifican los saldos de Inicio, Presupuesto o Movimientos.
+- Simulador de productos de ahorro con tasas efectivas o nominales, capitalización, aportes, costos y retenciones. Los resultados son proyecciones hipotéticas, no rendimientos garantizados ni saldos reales.
 - Presupuesto: registro separado del ingreso esperado y del importe efectivamente recibido.
 - Movimientos: registro del valor total de cada obligacion, el importe pagado y el saldo pendiente.
 - Categorias personalizadas desde la opcion `Otro` en Movimientos.
@@ -75,6 +78,8 @@ El respaldo exportado contiene configuración, ingresos, gastos, presupuestos, c
 Los movimientos conservan `valorPresupuestado` como importe total, `valorPagado` como importe efectivamente abonado y `valorFaltante` como el saldo pendiente (nunca negativo). El modelo guarda `versionModeloFinanciero` y, para registros historicos ambiguos, `migracionFinanciera.original` conserva los valores anteriores y la regla aplicada. Un registro historico con estado `Pendiente` no se considera pagado durante la migracion.
 
 El saldo disponible actual es ingresos recibidos menos gastos pagados. El saldo proyectado es el saldo actual menos las obligaciones pendientes. Ambos se calculan desde los registros del periodo y usan valores enteros en COP.
+
+Los planes, metas, distribuciones, destinos, aportes programados, transferencias y retiros se guardan localmente en el mismo respaldo versionado. Las metas conservan su saldo inicial reconocido y el progreso se calcula desde transferencias confirmadas menos retiros. Una transferencia corregida o anulada queda en el historial para auditoría. El saldo declarado de un destino es una referencia y no se suma a los aportes contabilizados para evitar duplicarlos.
 
 La suite automatizada (cálculos, persistencia, periodos y operaciones de formularios) se ejecuta con:
 

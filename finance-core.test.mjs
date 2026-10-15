@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   addCategoryIfMissing,
+  annulSavingsTransfer,
   buildReports,
   archiveStorageValue,
   backupCounts,
@@ -10,8 +11,13 @@ import {
   buildMovementCopyPlan,
   calculateFinancialSummary,
   calculateMonthlySummary,
+  calculateSavingsDistribution,
+  calculateSavingsPlanAmount,
+  calculateSavingsSummary,
   createBackup,
   createInitialState,
+  correctSavingsTransfer,
+  convertAnnualRateToEffective,
   DATA_SCHEMA_VERSION,
   extractBackupData,
   formatCOP,
@@ -22,8 +28,20 @@ import {
   mergeBackup,
   migrateData,
   normalizeBudgetItem,
+  normalizeFinancialDestination,
   normalizeMovement,
+  normalizeSavingsDistribution,
+  normalizeSavingsGoal,
+  normalizeSavingsPlan,
+  normalizeScheduledSavings,
+  normalizeSavingsTransfer,
+  normalizeSavingsWithdrawal,
   removeRecord,
+  registerSavingsTransfer,
+  registerSavingsWithdrawal,
+  SAVINGS_DESTINATION_TYPES,
+  savingsCommitmentStatus,
+  simulateSavingsReturns,
   createCopiedMovement,
   shiftDateToPeriod,
   restoreStateFromBackup,
@@ -31,6 +49,392 @@ import {
   upsertRecord,
   validateBackup,
 } from "./finance-core.js";
+
+describe("ahorro y metas", () => {
+  test("actualiza de forma idempotente datos version 2 sin perder registros y completa las colecciones nuevas", () => {
+    const oldState = {
+      version: 2,
+      schemaVersion: 2,
+      settings: { userSetting: "preserve" },
+      movimientos: [{ id: "old-expense", tipo: "Gasto fijo", valorPresupuestado: 200 }],
+      metasAhorro: [{ id: "legacy-goal", nombre: "Universidad", valorObjetivo: 1000000, valorAhorrado: 125000 }],
+      deudas: [{ id: "legacy-debt", saldoActual: 900 }],
+    };
+    const migrated = migrateData(oldState, 2, "2026-10-14T12:00:00.000Z");
+    const repeated = migrateData(migrated, migrated.schemaVersion, "2026-10-15T12:00:00.000Z");
+
+    assert.equal(migrated.schemaVersion, DATA_SCHEMA_VERSION);
+    assert.deepEqual(repeated, migrated);
+    assert.equal(migrated.movimientos[0].id, "old-expense");
+    assert.equal(migrated.metasAhorro[0].valorAhorrado, 125000);
+    assert.equal(migrated.deudas[0].id, "legacy-debt");
+    for (const name of ["planesAhorro", "distribucionesAhorro", "destinosFinancieros", "aportesProgramados", "transferenciasAhorro", "retirosAhorro"]) {
+      assert.deepEqual(migrated[name], []);
+    }
+    assert.equal(migrated.settings.userSetting, "preserve");
+  });
+
+  test("calcula modalidades de ahorro fijo, porcentaje recibido o presupuestado e inteligente", () => {
+    const state = createInitialState();
+    state.presupuestos = [normalizeBudgetItem({
+      id: "plan-income",
+      anio: 2026,
+      mes: "junio",
+      tipo: "Ingreso",
+      valorPresupuestado: 1000000,
+      valorPagado: 700000,
+      versionModeloFinanciero: 2,
+    })];
+    state.movimientos = [normalizeMovement({
+      id: "plan-expense",
+      fecha: "2026-06-02",
+      anio: 2026,
+      mes: "junio",
+      tipo: "Gasto fijo",
+      valorPresupuestado: 200000,
+      valorPagado: 100000,
+      versionModeloFinanciero: 2,
+    })];
+    state.planesAhorro = [normalizeSavingsPlan({
+      id: "existing-plan",
+      modalidad: "fijo",
+      importeMensual: 50000,
+      estado: "Activo",
+    })];
+    state.aportesProgramados = [normalizeScheduledSavings({
+      id: "unlinked-schedule",
+      fechaProgramada: "2026-06-15",
+      importePrevisto: 50000,
+      estado: "Programado",
+    })];
+
+    const fixed = calculateSavingsPlanAmount(state, 2026, "junio", { modalidad: "fijo", importeMensual: 300000 });
+    const receivedPercentage = calculateSavingsPlanAmount(state, 2026, "junio", { modalidad: "porcentual", porcentaje: 20, basePorcentual: "recibido" });
+    const budgetedPercentage = calculateSavingsPlanAmount(state, 2026, "junio", { modalidad: "porcentual", porcentaje: 20, basePorcentual: "presupuestado" });
+    const intelligent = calculateSavingsPlanAmount(state, 2026, "junio", {
+      id: "new-smart",
+      modalidad: "inteligente",
+      escenario: "equilibrado",
+      reservaSeguridad: 100000,
+    });
+
+    assert.deepEqual(fixed, { amount: 300000, capacity: 500000, affordable: true });
+    assert.equal(receivedPercentage.amount, 140000);
+    assert.equal(receivedPercentage.base, 700000);
+    assert.equal(budgetedPercentage.amount, 200000);
+    assert.equal(budgetedPercentage.base, 1000000);
+    assert.equal(intelligent.capacity, 300000);
+    assert.equal(intelligent.amount, 150000);
+    assert.equal(normalizeSavingsPlan({ modalidad: "inteligente", escenario: "invalid" }).escenario, "equilibrado");
+    assert.equal(calculateSavingsPlanAmount(state, 2026, "junio", { modalidad: "fijo", importeMensual: 700000 }).affordable, false);
+  });
+
+  test("distribuye presupuesto por porcentaje y rechaza sumas mayores de cien sin alterar la entrada", () => {
+    const goals = [
+      normalizeSavingsGoal({ id: "home", nombre: "Vivienda", valorObjetivo: 1000000 }),
+      normalizeSavingsGoal({ id: "trip", nombre: "Viaje", valorObjetivo: 200000 }),
+      normalizeSavingsGoal({ id: "education", nombre: "Educacion", valorObjetivo: 500000 }),
+      normalizeSavingsGoal({ id: "emergency", nombre: "Emergencias", valorObjetivo: 300000 }),
+    ];
+    const distribution = {
+      id: "june-distribution",
+      anio: 2026,
+      mes: "junio",
+      presupuestoMensual: 800000,
+      asignaciones: [
+        { metaId: "home", porcentaje: 40 },
+        { metaId: "trip", porcentaje: 25 },
+        { metaId: "education", porcentaje: 20 },
+        { metaId: "emergency", porcentaje: 15 },
+      ],
+    };
+    const plan = calculateSavingsDistribution(distribution, goals);
+    assert.deepEqual(plan.allocations.map((item) => item.importe), [320000, 200000, 160000, 120000]);
+    assert.equal(plan.importeDistribuido, 800000);
+    assert.equal(plan.importeSinDistribuir, 0);
+    assert.throws(() => calculateSavingsDistribution({ ...distribution, asignaciones: [...distribution.asignaciones, { metaId: "trip", porcentaje: 1 }] }, goals), /mas de una vez/);
+    assert.throws(() => calculateSavingsDistribution({ ...distribution, asignaciones: [{ metaId: "home", porcentaje: 75 }, { metaId: "trip", porcentaje: 30 }] }, goals), /no puede superar el 100/);
+    const partial = calculateSavingsDistribution({ ...distribution, asignaciones: [{ metaId: "home", porcentaje: 40 }] }, goals);
+    assert.equal(partial.importeDistribuido, 320000);
+    assert.equal(partial.importeSinDistribuir, 480000);
+    assert.equal(distribution.asignaciones.length, 4);
+  });
+
+  test("registra aportes parciales y confirmados una sola vez sin alterar los saldos de consumo", () => {
+    const state = createInitialState();
+    state.presupuestos = [normalizeBudgetItem({
+      id: "savings-income",
+      anio: 2026,
+      mes: "junio",
+      tipo: "Ingreso",
+      valorPresupuestado: 1000000,
+      valorPagado: 1000000,
+      versionModeloFinanciero: 2,
+    })];
+    state.movimientos = [normalizeMovement({
+      id: "savings-expense",
+      fecha: "2026-06-02",
+      anio: 2026,
+      mes: "junio",
+      tipo: "Gasto fijo",
+      valorPresupuestado: 300000,
+      valorPagado: 100000,
+      versionModeloFinanciero: 2,
+    })];
+    state.metasAhorro = [normalizeSavingsGoal({ id: "trip-goal", nombre: "Viaje", valorObjetivo: 500000 })];
+    state.destinosFinancieros = [normalizeFinancialDestination({ id: "saving-account", nombre: "Ahorros", tipoProducto: "Cuenta de ahorros" })];
+    state.aportesProgramados = [normalizeScheduledSavings({
+      id: "june-saving",
+      planId: "plan-monthly",
+      importePrevisto: 400000,
+      fechaProgramada: "2026-06-15",
+      metaId: "trip-goal",
+      destinoId: "saving-account",
+    })];
+
+    assert.equal(savingsCommitmentStatus(state.aportesProgramados[0], [], new Date("2026-06-14T12:00:00")), "Programado");
+    assert.equal(savingsCommitmentStatus(state.aportesProgramados[0], [], new Date("2026-06-15T12:00:00")), "Pendiente");
+    assert.equal(savingsCommitmentStatus(state.aportesProgramados[0], [], new Date("2026-06-16T12:00:00")), "Vencido");
+
+    const first = registerSavingsTransfer(state, {
+      aporteProgramadoId: "june-saving",
+      importe: 150000,
+      fechaEfectiva: "2026-06-15",
+      referencia: "TRX-001",
+    }, () => "transfer-1");
+    assert.equal(savingsCommitmentStatus(first.aportesProgramados[0], first.transferenciasAhorro), "Parcial");
+    assert.throws(() => registerSavingsTransfer(first, {
+      aporteProgramadoId: "june-saving",
+      importe: 150000,
+      fechaEfectiva: "2026-06-15",
+      referencia: "TRX-001",
+    }), /Ya existe una transferencia/);
+    assert.throws(() => registerSavingsTransfer(first, {
+      aporteProgramadoId: "june-saving",
+      importe: 300000,
+      fechaEfectiva: "2026-06-15",
+    }), /supera el saldo pendiente/);
+
+    const second = registerSavingsTransfer(first, {
+      aporteProgramadoId: "june-saving",
+      importe: 250000,
+      fechaEfectiva: "2026-06-16",
+      referencia: "TRX-002",
+    }, () => "transfer-2");
+    assert.equal(savingsCommitmentStatus(second.aportesProgramados[0], second.transferenciasAhorro), "Transferido");
+    const summary = calculateSavingsSummary(second, 2026, "junio");
+    const finance = calculateMonthlySummary(second, 2026, "junio");
+    assert.equal(summary.ahorroAcumulado, 400000);
+    assert.equal(summary.ahorroProgramadoMes, 400000);
+    assert.equal(summary.ahorroTransferidoMes, 400000);
+    assert.equal(summary.ahorroPendienteTransferir, 0);
+    assert.equal(summary.dineroReservadoMes, 400000);
+    assert.equal(summary.dineroLibreParaGastar, 300000);
+    assert.equal(finance.saldoDisponible, 900000);
+    assert.equal(finance.saldoProyectado, 700000);
+    assert.equal(summary.capacidadAdicional, 300000);
+  });
+
+  test("retiros reducen el ahorro por meta y rechazan superar el saldo acreditado", () => {
+    const state = createInitialState();
+    state.metasAhorro = [normalizeSavingsGoal({
+      id: "emergency-goal",
+      nombre: "Emergencias",
+      valorObjetivo: 2000000,
+      valorAhorrado: 250000,
+    })];
+    state.transferenciasAhorro = [normalizeSavingsTransfer({
+      id: "emergency-transfer",
+      metaId: "emergency-goal",
+      destinoId: "cash",
+      importe: 500000,
+      fechaEfectiva: "2026-06-01",
+    })];
+
+    const withdrawn = registerSavingsWithdrawal(state, {
+      metaId: "emergency-goal",
+      importe: 300000,
+      fechaEfectiva: "2026-06-15",
+      motivo: "Reparacion urgente",
+    }, () => "withdrawal-1");
+    const summary = calculateSavingsSummary(withdrawn, 2026, "junio");
+
+    assert.equal(summary.progresoMetas[0].acumulado, 450000);
+    assert.equal(summary.ahorroAcumulado, 450000);
+    assert.throws(() => registerSavingsWithdrawal(withdrawn, {
+      metaId: "emergency-goal",
+      importe: 500000,
+      fechaEfectiva: "2026-06-16",
+    }), /supera el ahorro registrado/);
+  });
+
+  test("correccion y anulacion conservan historial y no vuelven a sumar operaciones canceladas", () => {
+    const state = createInitialState();
+    state.metasAhorro = [normalizeSavingsGoal({ id: "goal-correct", nombre: "Meta", valorObjetivo: 5000 })];
+    state.destinosFinancieros = [normalizeFinancialDestination({ id: "destination-correct", nombre: "Cuenta" })];
+    state.aportesProgramados = [normalizeScheduledSavings({
+      id: "commitment-correct",
+      importePrevisto: 1000,
+      fechaProgramada: "2026-06-15",
+      metaId: "goal-correct",
+      destinoId: "destination-correct",
+    })];
+    const registered = registerSavingsTransfer(state, {
+      id: "transfer-original",
+      aporteProgramadoId: "commitment-correct",
+      importe: 400,
+      fechaEfectiva: "2026-06-15",
+    });
+    const corrected = correctSavingsTransfer(registered, "transfer-original", {
+      importe: 350,
+      referencia: "CORREGIDA",
+    }, () => "transfer-correction");
+    assert.equal(corrected.transferenciasAhorro.length, 2);
+    assert.equal(corrected.transferenciasAhorro[0].estado, "Cancelada");
+    assert.equal(corrected.transferenciasAhorro[0].correccionReemplazadaPor, "transfer-correction");
+    assert.equal(calculateSavingsSummary(corrected, 2026, "junio").ahorroAcumulado, 350);
+    const annulled = annulSavingsTransfer(corrected, "transfer-correction", "Operacion anulada");
+    assert.equal(annulled.transferenciasAhorro.length, 2);
+    assert.equal(calculateSavingsSummary(annulled, 2026, "junio").ahorroAcumulado, 0);
+  });
+});
+
+describe("destinos y simulador", () => {
+  test("normaliza destinos de forma diferenciada y preserva restricciones de CDT", () => {
+    const cdt = normalizeFinancialDestination({
+      id: "term-deposit",
+      nombre: "CDT 180 dias",
+      tipoProducto: "CDT",
+      tasaAnual: 10,
+      tipoTasa: "efectiva",
+      capitalizacionPorAnio: 2,
+      plazoMeses: 6,
+      saldoDeclarado: 1000000,
+      capitalAportado: 900000,
+      permiteAportesDuranteVigencia: false,
+    });
+    const account = normalizeFinancialDestination({ id: "liquid-account", nombre: "Cuenta" });
+    assert.equal(cdt.tipoProducto, "CDT");
+    assert.equal(cdt.permiteAportesDuranteVigencia, false);
+    assert.equal(cdt.saldoDeclarado, 1000000);
+    assert.equal(cdt.capitalAportado, 900000);
+    assert.equal(account.tipoProducto, "Otro");
+    assert.equal(account.permiteAportesDuranteVigencia, true);
+    assert.equal(SAVINGS_DESTINATION_TYPES.length, 10);
+  });
+
+  test("convierte tasas nominal y efectiva anual con frecuencia de capitalizacion", () => {
+    assert.equal(convertAnnualRateToEffective(12, "efectiva", 12), 0.12);
+    assert.ok(Math.abs(convertAnnualRateToEffective(12, "nominal", 12) - 0.12682503013196977) < 1e-12);
+    assert.throws(() => convertAnnualRateToEffective(-1200, "nominal", 12), /tasa periodica invalida/);
+    assert.throws(() => convertAnnualRateToEffective(-100, "efectiva", 12), /menor a -100/);
+  });
+
+  test("simula aportes e intereses mensuales, costos y retenciones como proyeccion no garantizada", () => {
+    const result = simulateSavingsReturns({
+      tipoProducto: "Cuenta remunerada",
+      capitalInicial: 1000000,
+      aportePeriodico: 100000,
+      periodicidad: "mensual",
+      plazoMeses: 12,
+      tasaAnual: 12,
+      tipoTasa: "efectiva",
+      capitalizacionPorAnio: 12,
+      costosMensuales: 1000,
+      costoApertura: 5000,
+      retencionPorcentaje: 4,
+    });
+    assert.equal(result.evolucionMensual.length, 12);
+    assert.equal(result.capitalAportado, 2200000);
+    assert.equal(result.costosEstimados, 17000);
+    assert.ok(result.rendimientoBrutoEstimado > 0);
+    assert.ok(result.retencionesEstimadas > 0);
+    assert.ok(result.valorFuturoEstimado > result.capitalAportado - result.costosEstimados);
+    assert.equal(result.esProyeccion, true);
+    assert.match(result.advertencia, /no representa una rentabilidad garantizada/);
+  });
+
+  test("no agrega aportes a CDT bloqueados y permite escenarios negativos para fondos", () => {
+    const cdt = simulateSavingsReturns({
+      tipoProducto: "CDT",
+      capitalInicial: 1000000,
+      aportePeriodico: 100000,
+      plazoMeses: 6,
+      tasaAnual: 10,
+      tipoTasa: "efectiva",
+      capitalizacionPorAnio: 2,
+      permiteAportesDuranteVigencia: false,
+    });
+    const fund = simulateSavingsReturns({
+      tipoProducto: "Fondo de inversión colectiva",
+      capitalInicial: 1000000,
+      plazoMeses: 12,
+      tasaAnual: -12,
+      tipoTasa: "efectiva",
+      capitalizacionPorAnio: 12,
+    });
+    assert.equal(cdt.aportesAdicionalesHabilitados, false);
+    assert.equal(cdt.aportePeriodicoModelado, 0);
+    assert.equal(cdt.capitalAportado, 1000000);
+    assert.ok(cdt.valorFuturoEstimado > 1000000);
+    assert.ok(fund.valorFuturoEstimado < 1000000);
+    assert.ok(fund.rendimientoBrutoEstimado < 0);
+  });
+
+  test("respaldo y restauracion incluyen colecciones de ahorro conservando ids y saldos", () => {
+    const state = createInitialState();
+    state.metasAhorro = [normalizeSavingsGoal({ id: "goal-backup", nombre: "Fondo", valorObjetivo: 10000, valorAhorrado: 400 })];
+    state.planesAhorro = [normalizeSavingsPlan({ id: "plan-backup", modalidad: "fijo", importeMensual: 1000 })];
+    state.distribucionesAhorro = [normalizeSavingsDistribution({
+      id: "distribution-backup",
+      anio: 2026,
+      mes: "junio",
+      presupuestoMensual: 1000,
+      asignaciones: [{ metaId: "goal-backup", porcentaje: 100 }],
+    })];
+    state.destinosFinancieros = [normalizeFinancialDestination({
+      id: "destination-backup",
+      nombre: "Ahorros",
+      tasaAnual: -2,
+    })];
+    state.aportesProgramados = [normalizeScheduledSavings({
+      id: "schedule-backup",
+      metaId: "goal-backup",
+      destinoId: "destination-backup",
+      importePrevisto: 1000,
+      fechaProgramada: "2026-06-15",
+    })];
+    state.transferenciasAhorro = [normalizeSavingsTransfer({
+      id: "transfer-backup",
+      aporteProgramadoId: "schedule-backup",
+      metaId: "goal-backup",
+      destinoId: "destination-backup",
+      importe: 1000,
+      fechaEfectiva: "2026-06-15",
+    })];
+    state.retirosAhorro = [normalizeSavingsWithdrawal({
+      id: "withdrawal-backup",
+      metaId: "goal-backup",
+      destinoId: "destination-backup",
+      importe: 100,
+      fechaEfectiva: "2026-06-20",
+    })];
+
+    const backup = createBackup(state, "2026-10-14T12:00:00.000Z");
+    const restored = extractBackupData(backup);
+    const counts = backupCounts(backup);
+    for (const key of ["metasAhorro", "planesAhorro", "distribucionesAhorro", "destinosFinancieros", "aportesProgramados", "transferenciasAhorro", "retirosAhorro"]) {
+      assert.deepEqual(restored[key], state[key]);
+    }
+    assert.equal(counts.planesAhorro, 1);
+    assert.equal(counts.distribucionesAhorro, 1);
+    assert.equal(counts.destinosFinancieros, 1);
+    assert.equal(counts.aportesProgramados, 1);
+    assert.equal(counts.transferenciasAhorro, 1);
+    assert.equal(counts.retirosAhorro, 1);
+    assert.equal(validateBackup(backup).ok, true);
+  });
+});
 
 describe("calculos financieros", () => {
   test("mantiene saldo negativo cuando los pagos y obligaciones exceden los ingresos", () => {
@@ -741,6 +1145,14 @@ test("validates backups and rejects malformed payloads", () => {
   assert.equal(validateBackup(state).ok, true);
   assert.equal(validateBackup({ movimientos: [] }).ok, false);
   assert.equal(validateBackup(null).ok, false);
+  const negativeRateBackup = createBackup({
+    ...state,
+    destinosFinancieros: [normalizeFinancialDestination({ id: "negative-rate", tasaAnual: -2 })],
+  });
+  assert.equal(validateBackup(negativeRateBackup).ok, true);
+  const invalidRateBackup = createBackup(state);
+  invalidRateBackup.data.destinosFinancieros = [{ id: "invalid-rate", tasaAnual: -101 }];
+  assert.equal(validateBackup(invalidRateBackup).ok, false);
 });
 
 test("merges backups by id without duplicating existing records", () => {
