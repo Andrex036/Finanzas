@@ -701,6 +701,96 @@ export function registerSavingsWithdrawal(state, input, makeId = () => id("retir
   return { ...state, retirosAhorro: [...(state.retirosAhorro || []), withdrawal] };
 }
 
+export function normalizeSavingEntry(input = {}) {
+  const tipo = input.tipo === "Retiro" ? "Retiro" : "Asignacion";
+  return {
+    ...input,
+    id: input.id || id("aho"),
+    tipo,
+    periodo: String(input.periodo || input.fecha || "").slice(0, 7),
+    objetivo: String(input.objetivo || "").trim(),
+    importe: toMoney(input.importe),
+    transferido: tipo === "Asignacion" && [true, "true", "on"].includes(input.transferido),
+    fecha: String(input.fecha || ""),
+    motivo: String(input.motivo || "").trim(),
+  };
+}
+
+function objectiveBalance(entries, objetivo) {
+  return entries
+    .filter((item) => item.objetivo === objetivo)
+    .reduce((sum, item) => sum + (item.tipo === "Retiro" ? -item.importe : item.transferido ? item.importe : 0), 0);
+}
+
+export function calculateSimpleSavings(state, year, month, surplus) {
+  const period = periodKey(year, month);
+  const entries = (state.ahorros || []).map(normalizeSavingEntry);
+  const upTo = entries.filter((item) => item.periodo <= period);
+  const monthAssignments = entries.filter((item) => item.tipo === "Asignacion" && item.periodo === period);
+  const base = Math.max(0, surplus);
+  const percent = (value) => (base > 0 ? Math.round((value / base) * 1000) / 10 : 0);
+  const assigned = monthAssignments.reduce((sum, item) => sum + item.importe, 0);
+  const names = [...new Set(upTo.map((item) => item.objetivo))].sort((a, b) => a.localeCompare(b));
+  const objetivos = names.map((nombre) => {
+    const rows = upTo.filter((item) => item.objetivo === nombre);
+    const consignado = rows.filter((item) => item.tipo === "Asignacion" && item.transferido).reduce((sum, item) => sum + item.importe, 0);
+    const pendiente = rows.filter((item) => item.tipo === "Asignacion" && !item.transferido).reduce((sum, item) => sum + item.importe, 0);
+    const retirado = rows.filter((item) => item.tipo === "Retiro").reduce((sum, item) => sum + item.importe, 0);
+    return { nombre, consignado, pendiente, retirado, saldo: consignado - retirado };
+  });
+  return {
+    sobrante: surplus,
+    asignadoMes: assigned,
+    disponibleParaAsignar: surplus - assigned,
+    porcentajeAsignado: percent(assigned),
+    asignaciones: monthAssignments.map((item) => ({ ...item, porcentaje: percent(item.importe) })),
+    objetivos,
+    acumulado: objetivos.reduce((sum, item) => sum + item.saldo, 0),
+    pendienteConsignar: objetivos.reduce((sum, item) => sum + item.pendiente, 0),
+    totalRetirado: objetivos.reduce((sum, item) => sum + item.retirado, 0),
+    retiros: upTo.filter((item) => item.tipo === "Retiro").sort((a, b) => b.fecha.localeCompare(a.fecha)),
+  };
+}
+
+export function addSavingAssignment(state, input, surplus, year, month, makeId = () => id("aho")) {
+  const entry = normalizeSavingEntry({ ...input, tipo: "Asignacion", periodo: periodKey(year, month), id: makeId() });
+  if (!entry.objetivo) throw new Error("Escribe el objetivo de ahorro.");
+  if (!entry.importe) throw new Error("El valor a asignar debe ser mayor que cero.");
+  const { disponibleParaAsignar } = calculateSimpleSavings(state, year, month, surplus);
+  if (entry.importe > disponibleParaAsignar) throw new Error("El valor supera el sobrante disponible para asignar.");
+  return { ...state, ahorros: [...(state.ahorros || []), entry] };
+}
+
+export function addSavingWithdrawal(state, input, makeId = () => id("aho")) {
+  const entry = normalizeSavingEntry({ ...input, tipo: "Retiro", periodo: String(input.fecha || "").slice(0, 7), id: makeId() });
+  if (!entry.objetivo) throw new Error("Selecciona el objetivo del retiro.");
+  if (!entry.importe) throw new Error("El valor del retiro debe ser mayor que cero.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.fecha)) throw new Error("Indica la fecha del retiro.");
+  const balance = objectiveBalance((state.ahorros || []).map(normalizeSavingEntry), entry.objetivo);
+  if (entry.importe > balance) throw new Error("El retiro supera lo ahorrado en ese objetivo.");
+  return { ...state, ahorros: [...(state.ahorros || []), entry] };
+}
+
+export function toggleSavingTransferred(state, entryId) {
+  const entries = (state.ahorros || []).map(normalizeSavingEntry);
+  const entry = entries.find((item) => item.id === entryId && item.tipo === "Asignacion");
+  if (!entry) throw new Error("No se encontro la asignacion.");
+  if (entry.transferido && objectiveBalance(entries, entry.objetivo) < entry.importe) {
+    throw new Error("No puedes desmarcar: ya hay retiros que dependen de este ahorro.");
+  }
+  return { ...state, ahorros: entries.map((item) => (item.id === entryId ? { ...item, transferido: !item.transferido } : item)) };
+}
+
+export function removeSavingEntry(state, entryId) {
+  const entries = (state.ahorros || []).map(normalizeSavingEntry);
+  const entry = entries.find((item) => item.id === entryId);
+  if (!entry) throw new Error("No se encontro el registro.");
+  if (entry.tipo === "Asignacion" && entry.transferido && objectiveBalance(entries, entry.objetivo) < entry.importe) {
+    throw new Error("No puedes eliminar: ya hay retiros que dependen de este ahorro.");
+  }
+  return { ...state, ahorros: entries.filter((item) => item.id !== entryId) };
+}
+
 export function calculateSavingsSummary(state, year, month, now = new Date()) {
   const confirmed = confirmedTransfers(state);
   const withdrawals = confirmedWithdrawals(state);
@@ -820,6 +910,7 @@ export function createInitialState() {
     aportesProgramados: [],
     transferenciasAhorro: [],
     retirosAhorro: [],
+    ahorros: [],
     categorias,
   };
 }
@@ -1119,6 +1210,7 @@ export function validateBackup(payload) {
     "aportesProgramados",
     "transferenciasAhorro",
     "retirosAhorro",
+    "ahorros",
   ];
   for (const name of listNames) {
     if (data[name] !== undefined && !Array.isArray(data[name])) return { ok: false, message: `La seccion ${name} debe ser una lista.` };
@@ -1236,6 +1328,7 @@ export function migrateData(input, sourceVersion = input?.schemaVersion ?? input
         "aportesProgramados",
         "transferenciasAhorro",
         "retirosAhorro",
+        "ahorros",
       ]) {
         if (!Array.isArray(data[name])) data[name] = [];
       }
@@ -1286,6 +1379,7 @@ export function extractBackupData(payload) {
     "aportesProgramados",
     "transferenciasAhorro",
     "retirosAhorro",
+    "ahorros",
   ]) {
     if (!Array.isArray(data[name])) data[name] = [];
     else data[name] = [...data[name]];
@@ -1317,6 +1411,7 @@ export function extractBackupData(payload) {
     "aportesProgramados",
     "transferenciasAhorro",
     "retirosAhorro",
+    "ahorros",
   ]) {
     data[name] = data[name].map((item, index) => item.id ? item : { ...item, id: legacyId(name, item, index) });
   }
@@ -1341,6 +1436,7 @@ export function mergeBackup(current, incoming) {
     "aportesProgramados",
     "transferenciasAhorro",
     "retirosAhorro",
+    "ahorros",
   ];
   const added = {};
   const duplicates = [];
@@ -1395,6 +1491,7 @@ export function backupCounts(payload) {
     aportesProgramados: (data.aportesProgramados || []).length,
     transferenciasAhorro: (data.transferenciasAhorro || []).length,
     retirosAhorro: (data.retirosAhorro || []).length,
+    ahorros: (data.ahorros || []).length,
   };
 }
 

@@ -3,19 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Finanzas Familiares</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2306111f'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-size='34' font-family='Arial' font-weight='700' fill='%2338bdf8'%3E$%3C/text%3E%3C/svg%3E" />
+    <title>TeCuadra</title>
+    <link rel="icon" type="image/png" href="./assets/imagenes/favicon.png" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark">$</span>
-          <div>
-            <strong>Finanzas</strong>
-            <small>Control familiar</small>
-          </div>
+          <img src="./assets/imagenes/logo-menu.png" alt="TeCuadra" class="brand-logo" />
         </div>
         <nav id="desktopNav" class="nav"></nav>
       </aside>
@@ -27,8 +23,16 @@
             <h1 id="viewTitle">Dashboard</h1>
           </div>
           <div class="period-controls">
-            <select id="yearSelect" aria-label="Ano"></select>
-            <select id="monthSelect" aria-label="Mes"></select>
+            <label class="period-chip">
+              <svg class="period-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg>
+              <span class="period-label">Año</span>
+              <select id="yearSelect" aria-label="Año"></select>
+            </label>
+            <label class="period-chip">
+              <svg class="period-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.2 2"/></svg>
+              <span class="period-label">Mes</span>
+              <select id="monthSelect" aria-label="Mes"></select>
+            </label>
           </div>
         </header>
         <section id="view" class="view" aria-live="polite"></section>

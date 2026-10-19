@@ -215,31 +215,21 @@ button.icon {
 .brand {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
   margin-bottom: 24px;
 }
 
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
-  background: linear-gradient(145deg, #38bdf8 0%, #2563eb 64%, #d9b46a 100%);
-  color: #071525;
-  font-size: 23px;
-  font-weight: 900;
-  box-shadow: 0 12px 28px rgba(56, 189, 248, 0.28);
-}
-
-.brand strong {
+.brand-logo {
   display: block;
-  font-size: 17px;
-}
-
-.brand small {
-  display: block;
-  color: var(--muted);
+  width: 100%;
+  max-width: 190px;
+  height: auto;
+  margin-inline: auto;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(56, 189, 248, 0.2);
 }
 
 .nav {
@@ -1764,4 +1754,628 @@ tr:last-child td {
   .future-goal-heading b {
     text-align: left;
   }
+}
+
+/* Mi Futuro: rediseño */
+.future-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 24px;
+  color: #eff6ff;
+  border: 1px solid rgba(125, 211, 252, 0.4);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 90% 10%, rgba(56, 189, 248, 0.35), transparent 45%),
+    linear-gradient(135deg, #0f2f57 0%, #1d4f91 55%, #2f80ed 100%);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.25);
+}
+
+.future-hero-text {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.future-eyebrow {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.future-hero h2 {
+  margin: 0 0 6px;
+  font-size: clamp(1.4rem, 3vw, 2rem);
+}
+
+.future-hero p {
+  margin: 0;
+  max-width: 52ch;
+  color: #cfe2f7;
+}
+
+.future-hero-badge {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+  padding: 16px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 12px;
+  background: rgba(6, 17, 31, 0.35);
+}
+
+.future-hero-badge span {
+  color: #cfe2f7;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.future-hero-badge strong {
+  font-size: clamp(1.4rem, 3vw, 2rem);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.future-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.future-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.future-grid {
+  margin-top: 0;
+}
+
+.future-card {
+  --tone: #2f80ed;
+  --tone-soft: rgba(47, 128, 237, 0.1);
+  position: relative;
+  overflow: hidden;
+  border-top: 4px solid var(--tone);
+}
+
+.tone-plan { --tone: #2f80ed; --tone-soft: rgba(47, 128, 237, 0.1); }
+.tone-goal { --tone: #10b981; --tone-soft: rgba(16, 185, 129, 0.1); }
+.tone-dist { --tone: #8b5cf6; --tone-soft: rgba(139, 92, 246, 0.1); }
+.tone-dest { --tone: #0ea5e9; --tone-soft: rgba(14, 165, 233, 0.1); }
+.tone-cal { --tone: #f59e0b; --tone-soft: rgba(245, 158, 11, 0.12); }
+.tone-wd { --tone: #f43f5e; --tone-soft: rgba(244, 63, 94, 0.1); }
+.tone-sim { --tone: #14b8a6; --tone-soft: rgba(20, 184, 166, 0.1); }
+.tone-hist { --tone: #64748b; --tone-soft: rgba(100, 116, 139, 0.1); }
+
+.future-card .panel-header {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.future-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: var(--tone-soft);
+  box-shadow: inset 0 0 0 1px var(--tone);
+  font-size: 22px;
+}
+
+.future-card .grid-form {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  padding: 16px;
+  border: 1px dashed var(--tone);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--tone-soft), rgba(255, 255, 255, 0.5));
+}
+
+.future-card .grid-form label {
+  color: #334a61;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.future-card .grid-form input,
+.future-card .grid-form select {
+  border-radius: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.future-card .grid-form input:focus,
+.future-card .grid-form select:focus {
+  border-color: var(--tone);
+  box-shadow: 0 0 0 3px var(--tone-soft);
+}
+
+.future-card .grid-form .actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.future-card .grid-form button[type="submit"] {
+  background: var(--tone);
+  border-color: var(--tone);
+  color: #fff;
+  border-radius: 999px;
+  padding-inline: 22px;
+}
+
+.future-card .grid-form button[type="submit"]:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.future-card .future-transfer-form {
+  margin-top: 18px;
+}
+
+.future-card .future-transfer-form h3 {
+  margin: 0;
+  color: #0f172a;
+}
+
+.future-card .future-list,
+.future-card .future-goals,
+.future-card .table-wrap,
+.future-card .empty,
+.future-card .allocation-summary,
+.future-card .simulation-result {
+  margin-top: 16px;
+}
+
+.future-goal {
+  border-left: 4px solid var(--tone);
+  background: #fff;
+  color: #0f172a;
+}
+
+.future-list li {
+  background: #fff;
+  color: #0f172a;
+}
+
+.future-goal progress {
+  height: 14px;
+  accent-color: var(--tone);
+}
+
+.future-card .allocation-summary,
+.future-card .simulation-result {
+  color: #0f172a;
+  background: var(--tone-soft);
+  border-color: var(--tone);
+}
+
+.future-card .future-list span,
+.future-card .future-goal small,
+.future-card .allocation-summary span,
+.future-card .allocation-summary small,
+.future-card .simulation-result span,
+.future-card .simulation-result small,
+.future-card .future-goal-heading span {
+  color: #52657a;
+}
+
+.future-card .simulation-result strong {
+  font-size: 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .future-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .future-hero {
+    padding: 18px;
+  }
+
+  .future-hero-badge {
+    width: 100%;
+  }
+}
+
+/* Menú móvil/tablet: centrado, iconos de línea azul neón animados */
+@media (max-width: 900px) {
+  .mobile-nav {
+    justify-content: center;
+    align-items: stretch;
+    gap: 4px;
+    overflow-x: visible;
+  }
+
+  .mobile-nav button {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    max-width: 120px;
+    min-width: 0;
+    min-height: 56px;
+    padding: 6px 4px;
+    position: relative;
+    background: transparent;
+    border-color: transparent;
+    font-size: 11px;
+    font-weight: 800;
+  }
+
+  .mobile-nav .nav-icon {
+    width: 26px;
+    height: 26px;
+    fill: none;
+    stroke: #38bdf8;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 120;
+    stroke-dashoffset: 0;
+    filter: drop-shadow(0 0 3px rgba(56, 189, 248, 0.7));
+    opacity: 0.65;
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+
+  .mobile-nav button.active {
+    background: rgba(56, 189, 248, 0.1);
+    border-color: rgba(56, 189, 248, 0.35);
+    box-shadow: 0 0 14px rgba(56, 189, 248, 0.25);
+  }
+
+  .mobile-nav button.active .nav-icon {
+    opacity: 1;
+    stroke: #7dd3fc;
+    animation: navDraw 900ms ease-out both, navGlow 2.4s ease-in-out 900ms infinite;
+  }
+
+  .mobile-nav button:active .nav-icon {
+    transform: scale(0.88);
+  }
+
+  .mobile-nav button.active::after {
+    content: "";
+    position: absolute;
+    bottom: 2px;
+    width: 18px;
+    height: 3px;
+    border-radius: 3px;
+    background: #38bdf8;
+    box-shadow: 0 0 8px #38bdf8;
+  }
+}
+
+@keyframes navDraw {
+  from { stroke-dashoffset: 120; }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes navGlow {
+  0%, 100% { filter: drop-shadow(0 0 3px rgba(56, 189, 248, 0.7)); }
+  50% { filter: drop-shadow(0 0 9px rgba(56, 189, 248, 1)); }
+}
+
+/* Menú lateral (PC): iconos de línea azul neón animados */
+@media (min-width: 901px) {
+  .nav button {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-weight: 800;
+  }
+
+  .nav .nav-icon {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: #38bdf8;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 120;
+    filter: drop-shadow(0 0 3px rgba(56, 189, 248, 0.7));
+    opacity: 0.65;
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+
+  .nav button:hover .nav-icon {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+
+  .nav button.active {
+    box-shadow: inset 3px 0 0 var(--accent-2), 0 0 14px rgba(56, 189, 248, 0.2);
+  }
+
+  .nav button.active .nav-icon {
+    opacity: 1;
+    stroke: #7dd3fc;
+    animation: navDraw 900ms ease-out both, navGlow 2.4s ease-in-out 900ms infinite;
+  }
+}
+
+/* Mi Futuro simplificado */
+.future-hero-bar {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  max-width: 420px;
+}
+
+.future-hero-bar progress,
+.saving-info progress {
+  width: 100%;
+  height: 10px;
+  accent-color: #7dd3fc;
+}
+
+.future-hero-bar small,
+.future-hero-badge small {
+  color: #cfe2f7;
+}
+
+.saving-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.saving-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  color: #0f172a;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--tone);
+  border-radius: 10px;
+}
+
+.saving-list li.done {
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.saving-info {
+  display: grid;
+  flex: 1 1 200px;
+  gap: 4px;
+  min-width: 0;
+}
+
+.saving-info span {
+  color: #52657a;
+}
+
+.saving-info progress {
+  accent-color: var(--tone);
+}
+
+.saving-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334a61;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.saving-check input {
+  width: 20px;
+  height: 20px;
+  accent-color: #10b981;
+}
+
+.saving-list button {
+  min-height: 34px;
+  font-size: 12px;
+}
+
+/* Tarjetas de Mi Futuro con la misma altura */
+.future-grid {
+  align-items: stretch;
+}
+
+.future-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.future-card > .grid-form {
+  flex: 0 0 auto;
+}
+
+/* Selector de periodo: estilo tecnológico */
+.period-controls {
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.period-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  border-radius: 999px;
+  background:
+    linear-gradient(#0a1a2e, #0a1a2e) padding-box,
+    linear-gradient(120deg, #38bdf8, #2f80ed, #10b981, #38bdf8) border-box;
+  background-size: 100% 100%, 300% 300%;
+  border: 1.5px solid transparent;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.25);
+  animation: periodFlow 6s linear infinite;
+  transition: box-shadow 200ms ease, transform 200ms ease;
+  cursor: pointer;
+}
+
+.period-chip:hover,
+.period-chip:focus-within {
+  transform: translateY(-1px);
+  box-shadow: 0 0 22px rgba(56, 189, 248, 0.55);
+}
+
+.period-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: #38bdf8;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.8));
+  animation: navGlow 2.6s ease-in-out infinite;
+}
+
+.period-label {
+  color: #7dd3fc;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.period-chip select {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 24px 0 4px;
+  border: 0;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2338bdf8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 2px center;
+  background-size: 16px;
+  color: #eff6ff;
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.period-chip select:hover {
+  background-color: transparent;
+}
+
+.period-chip select:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.period-chip select option {
+  background: #0a1a2e;
+  color: #eff6ff;
+}
+
+@keyframes periodFlow {
+  0% { background-position: 0 0, 0% 50%; }
+  100% { background-position: 0 0, 300% 50%; }
+}
+
+@media (max-width: 520px) {
+  .period-controls {
+    width: 100%;
+    gap: 8px;
+  }
+
+  .period-chip {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 8px;
+  }
+
+  .period-label {
+    display: none;
+  }
+
+  .period-chip select {
+    width: 100%;
+  }
+}
+
+/* Correcciones tras pruebas responsivas */
+.future-card .grid-form label.future-check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  font-size: 14px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.future-card .grid-form label.future-check input {
+  flex: 0 0 auto;
+  width: 20px;
+  min-height: 0;
+  height: 20px;
+  padding: 0;
+}
+
+@media (max-width: 520px) {
+  .period-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+}
+
+.future-card .panel-header {
+  flex-direction: row;
+  align-items: center;
+}
+
+.future-card .grid-form label.future-check input {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  background: #fff;
+  accent-color: #10b981;
+}
+
+.future-card .grid-form label.future-check input,
+.saving-check input {
+  color-scheme: light;
+}
+
+.future-card .grid-form label.future-check input,
+.saving-check input {
+  appearance: none;
+  -webkit-appearance: none;
+  display: grid;
+  place-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid #94a9bf;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.future-card .grid-form label.future-check input:checked,
+.saving-check input:checked {
+  border-color: #10b981;
+  background: #10b981 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12.5 4.5 4.5L19 7'/%3E%3C/svg%3E") center / 16px no-repeat;
 }

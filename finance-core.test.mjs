@@ -2,6 +2,9 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
+  addSavingAssignment,
+  addSavingWithdrawal,
+  calculateSimpleSavings,
   addCategoryIfMissing,
   annulSavingsTransfer,
   buildReports,
@@ -1308,4 +1311,21 @@ test("creates actionable financial alerts", () => {
   assert.match(messages, /Gasto excedido/);
   assert.match(messages, /Deuda proxima a vencer/);
   assert.match(messages, /Meta de ahorro sin aporte/);
+});
+
+test("ahorro simple: asigna sobrante, consigna y retira", () => {
+  let state = { ahorros: [] };
+  state = addSavingAssignment(state, { objetivo: "Viaje", importe: 300 }, 1000, 2026, "enero");
+  state = addSavingAssignment(state, { objetivo: "Emergencia", importe: 200, transferido: true }, 1000, 2026, "enero");
+  assert.throws(() => addSavingAssignment(state, { objetivo: "X", importe: 600 }, 1000, 2026, "enero"));
+  let summary = calculateSimpleSavings(state, 2026, "enero", 1000);
+  assert.equal(summary.disponibleParaAsignar, 500);
+  assert.equal(summary.porcentajeAsignado, 50);
+  assert.equal(summary.acumulado, 200);
+  assert.equal(summary.pendienteConsignar, 300);
+  state = addSavingWithdrawal(state, { objetivo: "Emergencia", importe: 50, fecha: "2026-02-10" });
+  assert.throws(() => addSavingWithdrawal(state, { objetivo: "Viaje", importe: 1, fecha: "2026-02-10" }));
+  summary = calculateSimpleSavings(state, 2026, "febrero", 0);
+  assert.equal(summary.acumulado, 150);
+  assert.equal(summary.totalRetirado, 50);
 });
